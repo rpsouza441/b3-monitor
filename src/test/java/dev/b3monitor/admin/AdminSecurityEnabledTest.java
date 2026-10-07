@@ -18,6 +18,8 @@ import tools.jackson.databind.json.JsonMapper;
 import java.math.BigDecimal;
 
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestBuilders.*;
+import static org.springframework.security.test.web.servlet.response.SecurityMockMvcResultMatchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -48,6 +50,7 @@ class AdminSecurityEnabledTest {
     @Autowired MockMvc mvc;
     @Autowired RuleAdminService admin;
     @Autowired RuleStateRepository ruleStates;
+    @Autowired AdminAuditRepository auditRepo;
     private final JsonMapper json = JsonMapper.builder().build();
 
     @BeforeEach
@@ -180,5 +183,72 @@ class AdminSecurityEnabledTest {
                         .contentType("application/json").content(json.writeValueAsString(body)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.revision").value((int) rev));    // SAME revision, no extra bump
+    }
+
+    // D — real browser session: form login, session reuse without Basic, logout invalidates
+    @Test
+    void browserFormLoginThenSessionReuseThenLogout() throws Exception {
+        // 1) form login with the synthetic credential inside the active chain → authenticated + session
+        var loginResult = mvc.perform(formLogin("/admin/login").user("admin").password(ADMIN_PASS))
+                .andExpect(authenticated().withUsername("admin"))
+                .andReturn();
+        var session = (org.springframework.mock.web.MockHttpSession) loginResult.getRequest().getSession(false);
+        org.junit.jupiter.api.Assertions.assertNotNull(session, "a session was established by form login");
+
+        // 2) a later GET reuses the session WITHOUT HTTP Basic
+        mvc.perform(get("/api/admin/status").session(session)).andExpect(status().isOk());
+
+        // 3) logout invalidates the session; the invalidated session no longer authenticates the API
+        mvc.perform(post("/admin/logout").with(csrf()).session(session));
+        mvc.perform(get("/api/admin/status").session(session)).andExpect(status().isUnauthorized());
+    }
+
+    // D — bad form credentials never authenticate
+    @Test
+    void browserFormLoginWithWrongPasswordFails() throws Exception {
+        mvc.perform(formLogin("/admin/login").user("admin").password("nope"))
+                .andExpect(unauthenticated());
+    }
+
+    // G — a successful mutation creates exactly one audit event; no credential leaks into it
+    @Test
+    void successfulMutationCreatesOneAuditEvent() throws Exception {
+        admin.create("sec-audit", "BBAS3", Comparator.ABOVE, new BigDecimal("40.00"), 2, BigDecimal.ZERO);
+        admin.selectMode("sec-audit", RuleMode.CROSSING);
+        long before = auditRepo.countByRuleId("sec-audit");
+        mvc.perform(post("/api/admin/rules/sec-audit/pause").with(user("admin").roles("ADMIN")).with(csrf()))
+                .andExpect(status().isOk());
+        long after = auditRepo.countByRuleId("sec-audit");
+        org.junit.jupiter.api.Assertions.assertEquals(before + 1, after, "pause writes one audit event");
+        var latest = auditRepo.findByOrderByOccurredAtDescIdDesc(
+                org.springframework.data.domain.PageRequest.of(0, 5));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                latest.stream().noneMatch(e -> e.getDetail() != null && e.getDetail().contains(ADMIN_PASS)),
+                "no credential appears in audit content");
+    }
+
+    // G — the audit read endpoint is ADMIN-only (VIEWER forbidden) and bounded
+    @Test
+    void auditEndpointIsAdminOnly() throws Exception {
+        mvc.perform(get("/api/admin/audit").with(user("viewer").roles("VIEWER")))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/api/admin/audit?size=10000").with(user("admin").roles("ADMIN")))
+                .andExpect(status().isOk());   // service hard-caps the page size regardless of the request
+    }
+
+    // H — the private UI: login page is reachable unauthenticated; an authenticated session renders a page
+    @Test
+    void uiLoginPageIsReachableAndRulesPageRequiresAuth() throws Exception {
+        mvc.perform(get("/admin/login")).andExpect(status().isOk());
+        // unauthenticated UI page is DENIED (never public): a browser Accept gets a login redirect,
+        // a non-browser client gets 401 — both prove it is not reachable without a session.
+        int unauth = mvc.perform(get("/admin/rules").accept(org.springframework.http.MediaType.TEXT_HTML))
+                .andReturn().getResponse().getStatus();
+        org.junit.jupiter.api.Assertions.assertTrue(unauth == 302 || unauth == 401,
+                "unauthenticated /admin/rules must be denied (redirect or 401), got " + unauth);
+        // authenticated → the rules page renders
+        mvc.perform(get("/admin/rules").with(user("admin").roles("ADMIN")))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith("text/html"));
     }
 }

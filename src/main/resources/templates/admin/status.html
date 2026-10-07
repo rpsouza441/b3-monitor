@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Status</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:60rem}nav a{margin-right:1rem}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:.3rem .6rem;text-align:left}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" style="display:inline">
+      <button type="submit">Logout</button>
+    </form>
+  </nav>
+  <h1>Status</h1>
+  <table>
+    <tr><th>Workers enabled</th><td th:text="${status.workersEnabled()}">false</td></tr>
+    <tr><th>Calendar dataset</th><td th:text="${status.calendarDatasetVersion()}">none</td></tr>
+    <tr><th>Calendar session</th><td th:text="${status.calendarSessionStatus()}">UNKNOWN</td></tr>
+    <tr><th>Rules total</th><td th:text="${status.rulesTotal()}">0</td></tr>
+    <tr><th>Rules active</th><td th:text="${status.rulesActive()}">0</td></tr>
+  </table>
+</body>
+</html>

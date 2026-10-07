@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Audit</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:70rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.3rem .5rem;text-align:left}form.inline{display:inline}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Admin audit (bounded, newest first)</h1>
+  <table>
+    <tr><th>When</th><th>Actor</th><th>Action</th><th>Rule</th><th>Before rev</th><th>After rev</th><th>Outcome</th><th>Detail</th></tr>
+    <tr th:each="e : ${events}">
+      <td th:text="${e.occurredAt()}"></td><td th:text="${e.actor()}"></td><td th:text="${e.action()}"></td>
+      <td th:text="${e.ruleId()}"></td><td th:text="${e.beforeRevision()}"></td><td th:text="${e.afterRevision()}"></td>
+      <td th:text="${e.outcome()}"></td><td th:text="${e.detail()}"></td>
+    </tr>
+  </table>
+</body>
+</html>
