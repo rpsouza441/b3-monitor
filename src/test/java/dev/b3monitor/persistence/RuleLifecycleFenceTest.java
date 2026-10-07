@@ -35,6 +35,14 @@ class RuleLifecycleFenceTest {
     @TestConfiguration
     static class Cfg {
         @Bean @Primary Clock fixedClock() { return Clock.fixed(NOW, ZoneOffset.UTC); }
+        /** Authorize WEGE3 so the dispatch path can reach prepareSend in the E tests. */
+        @Bean @Primary dev.b3monitor.domain.auth.OperationalAuthorization testAuthorization() {
+            return rule -> "WEGE3".equals(rule.ticker())
+                    ? new dev.b3monitor.domain.auth.OperationalAuthorization.Decision(
+                          dev.b3monitor.domain.auth.OperationalAuthorization.Status.AUTHORIZED, "test")
+                    : new dev.b3monitor.domain.auth.OperationalAuthorization.Decision(
+                          dev.b3monitor.domain.auth.OperationalAuthorization.Status.NOT_AUTHORIZED, "test");
+        }
     }
 
     @Autowired RuleAdminService admin;
@@ -42,6 +50,8 @@ class RuleLifecycleFenceTest {
     @Autowired RuleDefinitionRepository ruleDefs;
     @Autowired RuleStateRepository ruleStates;
     @Autowired OutboxRepository outbox;
+    @Autowired OutboxTxOps outboxTx;
+    @Autowired dev.b3monitor.domain.outbox.WahaOutboundAdapter adapter;
 
     private long seedCrossing(String id) {
         admin.find(id).ifPresent(e -> {});
@@ -59,9 +69,11 @@ class RuleLifecycleFenceTest {
         return new Quote("WEGE3", "WEGE3", false, "BRL", price, null, null, src, NOW, false);
     }
     private void cleanup(String id) {
-        outbox.findByRuleIdAndState(id, OutboxState.PENDING).forEach(outbox::delete);
+        for (OutboxState st : OutboxState.values()) {
+            outbox.findByRuleIdAndState(id, st).forEach(outbox::delete);
+        }
         ruleStates.findByRuleId(id).ifPresent(ruleStates::delete);
-        admin.find(id).flatMap(e -> ruleDefs.findByRuleId(id)).ifPresent(ruleDefs::delete);
+        ruleDefs.findByRuleId(id).ifPresent(ruleDefs::delete);
     }
 
     @Test
@@ -81,7 +93,7 @@ class RuleLifecycleFenceTest {
         assertFalse(r.fired());
         assertEquals("RULE_PAUSED_CURRENT", r.detail());
         assertTrue(ruleStates.findByRuleId(id).isEmpty(), "no rule_state mutation on a fenced-out evaluation");
-        assertEquals(0, outbox.countByState(OutboxState.PENDING));
+        assertEquals(0, outbox.findByRuleIdAndState(id, OutboxState.PENDING).size());
         cleanup(id);
     }
 
@@ -94,10 +106,10 @@ class RuleLifecycleFenceTest {
         processing.process(snap, q(new BigDecimal("49.00"), NOW.minusSeconds(120))); // ARMED
         var fire = processing.process(snap, q(new BigDecimal("50.50"), NOW.minusSeconds(90)));
         assertTrue(fire.fired());
-        assertEquals(1, outbox.countByState(OutboxState.PENDING));
+        assertEquals(1, outbox.findByRuleIdAndState(id, OutboxState.PENDING).size());
         admin.pause(id);                                   // pause after → cancels the unsent PENDING
-        assertEquals(0, outbox.countByState(OutboxState.PENDING));
-        assertEquals(1, outbox.countByState(OutboxState.CANCELLED));
+        assertEquals(0, outbox.findByRuleIdAndState(id, OutboxState.PENDING).size());
+        assertEquals(1, outbox.findByRuleIdAndState(id, OutboxState.CANCELLED).size());
         cleanup(id);
     }
 
@@ -113,7 +125,7 @@ class RuleLifecycleFenceTest {
         assertFalse(r.fired());
         assertEquals("STALE_RULE_DEFINITION", r.detail());
         assertTrue(ruleStates.findByRuleId(id).isEmpty());
-        assertEquals(0, outbox.countByState(OutboxState.PENDING));
+        assertEquals(0, outbox.findByRuleIdAndState(id, OutboxState.PENDING).size());
         cleanup(id);
     }
 
@@ -136,7 +148,7 @@ class RuleLifecycleFenceTest {
         pool.shutdownNow();
         // Whatever the interleaving, an active rule must never be left with an uncancelled PENDING:
         // either process lost (no PENDING) or process won then pause cancelled it.
-        assertEquals(0, outbox.countByState(OutboxState.PENDING),
+        assertEquals(0, outbox.findByRuleIdAndState(id, OutboxState.PENDING).size(),
                 "no unsent PENDING survives a committed pause");
         cleanup(id);
     }
@@ -188,5 +200,85 @@ class RuleLifecycleFenceTest {
                 () -> admin.edit(id, rev - 1, Comparator.ABOVE, new BigDecimal("60.00"), 2, new BigDecimal("0.10")));
         assertEquals(rev, admin.find(id).orElseThrow().getRevision(), "no mutation on a stale expectedRevision");
         cleanup(id);
+    }
+
+    // ----- item E: lifecycle fence at prepareSend (dispatch) -----
+
+    /** Drive a crossing so a PENDING outbox row exists, then claim it (IN_FLIGHT) and return the claim. */
+    private OutboxTxOps.Claim seedPendingAndClaim(String id, long rev) {
+        processing.process(snapshot(id, rev), q(new BigDecimal("49.00"), NOW.minusSeconds(180))); // ARMED
+        processing.process(snapshot(id, rev), q(new BigDecimal("50.50"), NOW.minusSeconds(120))); // fire → PENDING
+        assertEquals(1, outbox.findByRuleIdAndState(id, OutboxState.PENDING).size());
+        var claim = outboxTx.claimNext("test-worker");
+        assertNotNull(claim, "claimed PENDING → IN_FLIGHT");
+        return claim;
+    }
+
+    private int sends() { return ((CallRecordingAdapter) adapter).sends.get(); }
+
+    /** E1 — pause wins the fence before prepareSend: the eligibility guard sees paused → DENIED_TERMINAL,
+     *  SENDING is never committed, and the adapter is never called. */
+    @Test
+    void pauseWinsBeforePrepareSendZeroAdapterCalls() {
+        String id = "fence-e1";
+        long rev = seedCrossing(id);
+        var claim = seedPendingAndClaim(id, rev);
+        int before = sends();
+        admin.pause(id);                                   // admin locks the rule row + commits paused
+        var prepared = outboxTx.prepareSend(claim.rowId(), claim.fencingToken(), NOW);
+        assertEquals(OutboxTxOps.PrepareOutcome.DENIED_TERMINAL, prepared.outcome(),
+                "a paused rule denies send authority at the fence");
+        assertEquals(before, sends(), "zero adapter calls when pause wins");
+        assertNotEquals(OutboxState.SENDING, outbox.findById(claim.rowId()).orElseThrow().getState());
+        cleanup(id);
+    }
+
+    /** E2 — prepareSend wins: SENDING authority commits; a later pause MUST NOT rewrite that as unsent. */
+    @Test
+    void prepareSendWinsBeforePauseAuthorityPreserved() {
+        String id = "fence-e2";
+        long rev = seedCrossing(id);
+        var claim = seedPendingAndClaim(id, rev);
+        var prepared = outboxTx.prepareSend(claim.rowId(), claim.fencingToken(), NOW);
+        assertEquals(OutboxTxOps.PrepareOutcome.AUTHORIZED, prepared.outcome(), "send authority committed");
+        assertEquals(OutboxState.SENDING, outbox.findById(claim.rowId()).orElseThrow().getState());
+        // pause now runs — it cancels only PENDING, and must NOT rewrite the SENDING authority as unsent
+        admin.pause(id);
+        assertEquals(OutboxState.SENDING, outbox.findById(claim.rowId()).orElseThrow().getState(),
+                "pause after SENDING cannot declare the side effect unsent");
+        // the normal typed transport result then applies
+        var mapped = outboxTx.record(claim.rowId(), claim.fencingToken(),
+                dev.b3monitor.domain.outbox.SubmissionResult.accepted(), NOW);
+        assertEquals(OutboxState.ACCEPTED, mapped);
+        cleanup(id);
+    }
+
+    /** E3 — a stale-revision intent cannot obtain new send authority: an edit bumps the revision, so the
+     *  guard's revision check denies the old PENDING at the fence. */
+    @Test
+    void staleRevisionIntentCannotGetSendAuthority() {
+        String id = "fence-e3";
+        long rev = seedCrossing(id);
+        var claim = seedPendingAndClaim(id, rev);          // PENDING at rev
+        admin.edit(id, rev, Comparator.ABOVE, new BigDecimal("55.00"), 2, new BigDecimal("0.10")); // rev+1
+        int before = sends();
+        var prepared = outboxTx.prepareSend(claim.rowId(), claim.fencingToken(), NOW);
+        assertNotEquals(OutboxTxOps.PrepareOutcome.AUTHORIZED, prepared.outcome(),
+                "a superseded-revision intent cannot get send authority");
+        assertEquals(before, sends(), "no adapter call for a stale-revision intent");
+        cleanup(id);
+    }
+
+    /** A call-recording WAHA adapter so the E tests can assert adapter-call counts. */
+    @TestConfiguration
+    static class AdapterCfg {
+        @Bean @Primary CallRecordingAdapter callRecordingAdapter() { return new CallRecordingAdapter(); }
+    }
+    static class CallRecordingAdapter implements dev.b3monitor.domain.outbox.WahaOutboundAdapter {
+        final java.util.concurrent.atomic.AtomicInteger sends = new java.util.concurrent.atomic.AtomicInteger();
+        @Override public dev.b3monitor.domain.outbox.SubmissionResult send(dev.b3monitor.domain.outbox.AlertIntent intent) {
+            sends.incrementAndGet();
+            return dev.b3monitor.domain.outbox.SubmissionResult.accepted();
+        }
     }
 }

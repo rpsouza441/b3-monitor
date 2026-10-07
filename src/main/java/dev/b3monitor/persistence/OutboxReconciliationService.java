@@ -71,6 +71,13 @@ public class OutboxReconciliationService {
         return repo.findNeedingReconciliation();
     }
 
+    /** Cycle-11 item F: BOUNDED dead-letter page, newest first; the size is hard-capped (never unbounded). */
+    @Transactional(readOnly = true)
+    public List<OutboxEntity> deadLetters(int limit) {
+        int capped = Math.max(1, Math.min(limit, 200));   // hard cap: no caller can request an unbounded page
+        return repo.findNeedingReconciliation(org.springframework.data.domain.PageRequest.of(0, capped));
+    }
+
     /**
      * Requeue an {@code UNKNOWN_OUTCOME} row for a fresh send — ONLY with verified proof of
      * non-delivery. The caller is responsible for that proof (e.g. a provider receipt lookup showing

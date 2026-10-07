@@ -69,6 +69,15 @@ public interface OutboxRepository extends JpaRepository<OutboxEntity, Long> {
            """)
     List<OutboxEntity> findNeedingReconciliation();
 
+    /** Cycle-11 item F: BOUNDED dead-letter page (caller passes a capped Pageable), stable newest-first. */
+    @Query("""
+           select o from OutboxEntity o
+           where o.state in (dev.b3monitor.domain.outbox.OutboxState.UNKNOWN_OUTCOME,
+                             dev.b3monitor.domain.outbox.OutboxState.FAILED)
+           order by o.id desc
+           """)
+    List<OutboxEntity> findNeedingReconciliation(org.springframework.data.domain.Pageable pageable);
+
     /**
      * Unsent (PENDING) rows for a rule whose {@code ruleRevision} is strictly below {@code newRevision}
      * — the rows a revision bump must cancel (cycle-6 review P0-3). ACCEPTED/UNKNOWN/terminal rows are
