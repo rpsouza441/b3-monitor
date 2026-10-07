@@ -26,16 +26,19 @@ import java.time.ZoneOffset;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration tests against a REAL PostgreSQL via Testcontainers, exercising Flyway V1–V12, the unique
- * logical-key constraint, the post-commit dispatcher (claim/lease/fencing/claim-generation), a
- * TWO-CONSUMER dispatch race, durable rule-state recovery, expired-lease quarantine (NO resend),
- * stale-result fencing after reconciliation, revision supersession / old-PENDING cancellation, and the
- * quota first-allocation race across two managers. REQUIRES a Docker daemon and runs ONLY under
- * {@code mvn verify -Pdocker-it}. Named *IT so the Surefire unit phase skips it.
+ * Integration tests against a REAL PostgreSQL via Testcontainers, exercising Flyway V1–V13 (incl. the V13
+ * admin_audit_event ledger + the latest-quote index), the unique logical-key constraint, the post-commit
+ * dispatcher (claim/lease/fencing/claim-generation), a TWO-CONSUMER dispatch race, durable rule-state
+ * recovery, expired-lease quarantine (NO resend), stale-result fencing, revision supersession, V13 audit
+ * persistence, latest-quote index compatibility, and the quota first-allocation race. REQUIRES a Docker
+ * daemon and runs ONLY under {@code mvn verify -Pdocker-it}. Named *IT so the Surefire unit phase skips it.
  *
- * <p>Cycle-4 review P1-1 fix: the context uses a FIXED test {@link Clock} (NOW) and the quotes are
- * built relative to that clock, so the 45-minute freshness guard does not fail the test when run on a
- * later date. {@code ddl-auto=validate} makes context start itself prove V1–V12 match the entities.
+ * <p>The allow-all {@code testGuard} here isolates the TRANSPORT-only dispatch tests (claim→SENDING→record);
+ * the REAL lifecycle/eligibility fence (pause↔process / pause↔prepareSend / stale-revision↔prepareSend) is
+ * exercised with the REAL {@code FailClosedDispatchEligibilityGuard} in {@link LifecycleFencePostgresIT}.
+ *
+ * <p>A FIXED test {@link Clock} (NOW) keeps the 45-minute freshness guard stable on any run date;
+ * {@code ddl-auto=validate} makes context start itself prove V1–V13 match the entities.
  */
 @Testcontainers
 @SpringBootTest
@@ -53,7 +56,7 @@ class OutboxPostgresIT {
         r.add("spring.datasource.username", postgres::getUsername);
         r.add("spring.datasource.password", postgres::getPassword);
         r.add("spring.flyway.enabled", () -> "true");
-        r.add("spring.jpa.hibernate.ddl-auto", () -> "validate"); // proves V1–V12 match the entities
+        r.add("spring.jpa.hibernate.ddl-auto", () -> "validate"); // proves V1–V13 match the entities
         r.add("b3monitor.workers.enabled", () -> "false");
     }
 
@@ -198,5 +201,34 @@ class OutboxPostgresIT {
         long granted = java.util.stream.Stream.of(ra, rb)
                 .filter(x -> x instanceof dev.b3monitor.quota.BrapiQuotaManager.Granted).count();
         assertEquals(1, granted, "exactly one manager wins the single durable in-flight slot");
+    }
+
+    @Autowired dev.b3monitor.admin.AdminAuditRepository auditRepo;
+
+    /** V13: the admin_audit_event table persists and round-trips on real Postgres. */
+    @Test
+    void adminAuditEventPersistsOnRealPostgres() {
+        var ev = new dev.b3monitor.admin.AdminAuditEvent(NOW, "admin",
+                dev.b3monitor.admin.AdminAuditEvent.Action.PAUSE, "it-audit", 2L, 2L,
+                dev.b3monitor.admin.AdminAuditEvent.Outcome.SUCCESS, "paused", null);
+        var saved = auditRepo.save(ev);
+        assertNotNull(saved.getId());
+        var page = auditRepo.findByOrderByOccurredAtDescIdDesc(
+                org.springframework.data.domain.PageRequest.of(0, 10));
+        assertTrue(page.stream().anyMatch(e -> "it-audit".equals(e.getRuleId())));
+        assertEquals(1, auditRepo.countByRuleId("it-audit"));
+    }
+
+    /** V13 index + entity: the bounded latest-observation query returns the newest row by receipt time. */
+    @Test
+    void latestQuoteBoundedQueryUsesV13Index() {
+        observations.save(new QuoteObservationEntity("brapi", "WEGE3", "WEGE3", false,
+                QuoteObservationEntity.BRAPI_V2_CONTRACT, "BRL", new BigDecimal("40.00"), null,
+                NOW.minusSeconds(600), NOW.minusSeconds(600), false, true, ""));
+        observations.save(new QuoteObservationEntity("brapi", "WEGE3", "WEGE3", false,
+                QuoteObservationEntity.BRAPI_V2_CONTRACT, "BRL", new BigDecimal("41.00"), null,
+                NOW.minusSeconds(60), NOW.minusSeconds(60), false, true, ""));
+        var latest = observations.findFirstByRequestedTickerOrderByReceiptTimeDesc("WEGE3").orElseThrow();
+        assertEquals(0, latest.getPrice().compareTo(new BigDecimal("41.00")), "newest-by-receipt row returned");
     }
 }
