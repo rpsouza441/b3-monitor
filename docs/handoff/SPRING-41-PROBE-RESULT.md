@@ -1,95 +1,59 @@
-# Spring Boot 4.1 migration probe — result (updated cycle 7)
+# Spring Boot 4.1.1 Migration — RESULT (COMPLETED, cycle 9)
 
-**What this is.** A throwaway probe of a **sanitized copy** of the cycle-7 source tree (pom.xml + src)
-in a scratch directory OUTSIDE the production working tree. The main tree is untouched and still on
-Spring Boot 3.3.13. Item H asked to FINISH the probe (not just the first compile stop) and record every
-additional blocker **without overclaiming**.
+Status: **DONE and green.** This supersedes the cycle-7/8 probe notes (which stopped at the Jackson 2→3
+blocker and then a guessed Testcontainers 2.0 coordinate). The migration is committed on branch
+`checkpoint/cycle7-reviewed` as `e864fad` (`chore: migrate to Spring Boot 4.1.1`), separate from the
+cycle-9 functional commit `172e768`.
 
-## Step 1 — stepping stone: Spring Boot 3.5.6
-(Confirmed in cycle 6.) `mvn test` → BUILD SUCCESS, suite green, with `@MockBean`/`@SpyBean`
-deprecation warnings.
+## Outcome
 
-## Step 2 — Spring Boot 4.1.0, full migration attempt (cycle 7)
-Applied in the probe copy, in order:
-1. parent `3.3.13 → 4.1.0`;
-2. test annotations `@MockBean`/`@SpyBean` → `@MockitoBean`/`@MockitoSpyBean`
-   (`org.springframework.test.context.bean.override.mockito.*`);
-3. Jackson 2 → 3 in `RestClientBrapiClient`: import `com.fasterxml.jackson.databind.JsonNode` →
-   `tools.jackson.databind.JsonNode`.
+`mvn -DskipTests compile` ✓ · `mvn test` → **148 passed, 0 failures, 0 errors on Spring Boot 4.1.1**
+(previously 134 on 3.3.13; the delta is the cycle-9 regressions, not migration churn).
 
-**Result — MAIN compiles under 4.1.0.** The cycle-6 first blocker (Jackson 2→3) is cleared by the
-import change; `RestClient.bodyTo(JsonNode.class)` resolves against Jackson 3. So the earlier report's
-careful wording was correct: Jackson was only *the first observed blocker*, not the whole migration.
+## Exact coordinates used (the previously-guessed one was wrong)
 
-**New blocker surfaced at TEST compile — Boot 4 test-slice modularization.** Every `@DataJpaTest` test
-fails to compile:
+| Concern | Cycle-8 guess (failed) | Cycle-9 (verified, works) |
+|---|---|---|
+| Parent | 3.3.13 | `spring-boot-starter-parent:4.1.1` |
+| Testcontainers JUnit | `org.testcontainers:junit-jupiter:2.0.0` (absent) | `org.testcontainers:testcontainers-junit-jupiter` (BOM-managed **2.0.5**) |
+| Testcontainers Postgres | `org.testcontainers:postgresql` | `org.testcontainers:testcontainers-postgresql` (BOM-managed **2.0.5**) |
+| TC version pin | `<testcontainers.version>` override | removed — let the Boot 4.1.1 BOM manage it |
+| `@DataJpaTest` | `…autoconfigure.orm.jpa.DataJpaTest` (gone from starter-test) | `org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest` + module `spring-boot-data-jpa-test` |
+| Jackson | `com.fasterxml.jackson.databind.JsonNode` (Jackson 2, gone) | `tools.jackson.databind.JsonNode` (Jackson 3) |
+| Mock test beans | `@MockBean` / `@SpyBean` | `@MockitoBean` / `@MockitoSpyBean` |
+
+## Changes applied
+
+- **pom.xml**: parent → 4.1.1; removed the `testcontainers.version` property; swapped the two
+  Testcontainers artifacts to the `testcontainers-*` IDs with NO explicit `<version>`; added the modern
+  `spring-boot-data-jpa-test` test module (NOT the `spring-boot-starter-test-classic` bridge — the modern
+  modules were sufficient, so the bridge is not a dependency).
+- **Jackson 2 → 3**: `RestClientBrapiClient` import only; the `JsonNode` node API (`path`/`get`/`asText`/
+  `asBoolean`) compiled unchanged against Jackson 3's databind.
+- **Test annotations**: `@DataJpaTest` import moved across 9 slice tests; `@MockBean`/`@SpyBean` →
+  `@MockitoBean`/`@MockitoSpyBean` in `SchedulerTransactionTest`.
+
+## Dependency-tree sanity (no accidental Jackson 2 shadow)
+
 ```
-package org.springframework.boot.test.autoconfigure.orm.jpa does not exist   (@DataJpaTest)
+tools.jackson.core:jackson-databind:3.1.5          ← active databind (Jackson 3)
+com.fasterxml.jackson.core:jackson-annotations:2.21 ← Jackson 3's OWN dependency (annotations package
+                                                       retains com.fasterxml by design) — NOT a J2 shadow
+org.testcontainers:testcontainers-junit-jupiter:2.0.5
+org.testcontainers:testcontainers-postgresql:2.0.5
 ```
-In Spring Boot 4 the test auto-configuration slices were split out of the monolithic
-`spring-boot-test-autoconfigure` / `spring-boot-starter-test`. `@DataJpaTest` is no longer on the
-classpath from `spring-boot-starter-test` alone — it now lives in a **separate modular test-autoconfigure
-artifact** that must be added as a test dependency. A naive import rewrite does NOT fix it (the package
-genuinely isn't present until the module is on the classpath); the fix is a POM dependency addition, not
-a code edit. This affects all 8 `@DataJpaTest` slices + the `@SpringBootTest` IT uses the same family.
 
-**Honest status:** `3.3 → 4.1` requires, at minimum: (a) Jackson 2→3 (done in probe, works);
-(b) `@MockitoBean`/`@MockitoSpyBean` rename (done in probe); (c) **add the modular JPA test-slice
-dependency** (and audit the other test slices — `@SpringBootTest`, mockito bean-override) to the test
-scope. The full 123-test run under 4.1 was NOT reached because test compile stopped at (c). No further
-blockers can be claimed beyond (c) until the dependency is added and the suite recompiles.
+There is no `com.fasterxml.jackson.core:jackson-databind` on the classpath — the only `com.fasterxml`
+artifact is the annotations jar, which Jackson 3 pulls in intentionally.
 
-## Exact remaining migration checklist (dedicated follow-up, with a Git checkpoint)
-1. `3.3.13 → 3.5.6` (green) → **commit** as a recoverable checkpoint.
-2. `@MockBean`→`@MockitoBean`, `@SpyBean`→`@MockitoSpyBean`.
-3. `3.5.6 → 4.1.0`: Jackson 2→3 in `RestClientBrapiClient`.
-4. Add the Boot 4 modular test-slice dependency so `@DataJpaTest` (and the other slices) resolve; find
-   the exact artifact from the Boot 4 BOM (do not guess the coordinates — read the Boot 4 migration
-   guide / dependency list).
-5. `mvn test`; then `mvn verify -Pdocker-it` on a Docker host.
-6. Record any further blockers that only appear once the suite recompiles and runs.
-7. Merge to main ONLY with a separate Git checkpoint/commit authorization.
+## Rollback plan (not needed — kept for the record)
 
-## Decision
-Confirmed `3→4` is a multi-step migration (Jackson 3 + annotation rename + **test-slice
-modularization**), not two tweaks. Main tree stays on 3.3.13 this cycle (no commit authorization; P0/P1
-correctness first). The probe is throwaway and left the production tree byte-unchanged.
+The migration is a single isolated commit (`e864fad`) on top of the green functional commit (`172e768`).
+If a later blocker surfaced, `git revert e864fad` (or `git reset --hard 172e768`) restores the
+134-green-on-3.3.13 state with the cycle-9 functional fixes intact.
 
----
+## Not covered by `mvn test`
 
-## Cycle 8 — ATTEMPTED on the checkpoint branch, then REVERTED (migration BLOCKED)
-
-With the authorized local checkpoint in place (`checkpoint/cycle7-reviewed`, functional fixes committed
-at `0daada3`), the 4.1 migration was attempted ON the branch with the commit as the rollback point:
-
-Applied: parent `3.3.13 → 4.1.0`; `spring-boot-starter-test` → **`spring-boot-starter-test-classic`**
-(the Boot-4 backward-compat starter that keeps `@DataJpaTest` and the other old slices on the
-classpath — this clears the cycle-7 test-slice blocker); Jackson 2 → 3 in `RestClientBrapiClient`
-(`tools.jackson.databind.JsonNode`); `@MockBean`/`@SpyBean` → `@MockitoBean`/`@MockitoSpyBean` across
-the tests; Testcontainers renamed `postgresql` → `testcontainers-postgresql` (per the Boot-4 testing
-migration note).
-
-**New blocker — Testcontainers 2.0 artifact coordinates.** `mvn test` on 4.1.0 failed at dependency
-resolution:
-```
-Could not find artifact org.testcontainers:junit-jupiter:jar:2.0.0 in central
-```
-The Boot-4 BOM / Testcontainers 2.0 module coordinates are NOT `org.testcontainers:junit-jupiter:2.0.0`
-as guessed — the groupId/artifactId/version for the 2.0 line must be read from the Boot 4.1 dependency
-BOM (do not guess). The full 134-test suite under 4.1 was therefore not reached; the remaining
-unknowns past this (any runtime/behavioral 4.1 differences) cannot yet be claimed.
-
-**Reverted.** Per the cycle-8 plan's rollback rule, the migration edits (pom + Jackson + annotations)
-were reverted with `git checkout -- pom.xml src`, returning to the green `0daada3` functional-fixes
-commit on 3.3.13 (134 tests green). The migration is **BLOCKED**, not done; nothing migration-related
-was committed.
-
-### Exact remaining migration steps (next dedicated attempt)
-1. From `0daada3`, bump to 4.1.0 + `spring-boot-starter-test-classic` + Jackson 3 + `@MockitoBean`/
-   `@MockitoSpyBean` (all proven to compile/resolve except Testcontainers).
-2. Resolve the correct **Testcontainers 2.0 coordinates** from the Spring Boot 4.1 dependency BOM
-   (the BOM-managed groupId/artifactId; likely a renamed module and a 2.x version that actually exists
-   in Central) — do NOT hardcode a guessed version.
-3. `mvn test` → then `mvn verify -Pdocker-it` on a Docker host.
-4. Commit as a SEPARATE local commit only if green; otherwise revert the migration commit and keep the
-   functional branch.
+The PostgreSQL IT (`-Pdocker-it`) did NOT run (Docker absent), so the Boot 4.1.1 + Testcontainers 2.0.5
+PostgreSQL container STARTUP is not yet proven end-to-end on this host. That is the one remaining
+migration-adjacent verification; run `mvn verify -Pdocker-it` where Docker is available.
