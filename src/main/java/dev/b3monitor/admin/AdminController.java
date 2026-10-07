@@ -52,7 +52,16 @@ public class AdminController {
     public OutboxMetricsView outboxMetrics() { return query.outboxMetrics(); }
 
     @GetMapping("/outbox/reconciliation")
-    public ReconciliationView reconciliation() { return query.reconciliation(); }
+    public ReconciliationView reconciliation(@RequestParam(name = "size", defaultValue = "50") int size) {
+        return query.reconciliation(size);   // service hard-caps the page size (no unbounded response)
+    }
+
+    @GetMapping("/audit")
+    @org.springframework.security.access.prepost.PreAuthorize("hasRole('ADMIN')")
+    public java.util.List<AdminDtos.AuditEventView> audit(
+            @RequestParam(name = "size", defaultValue = "50") int size) {
+        return query.audit(size);            // ADMIN only; service hard-caps the page size
+    }
 
     @GetMapping("/quotes/{ticker}/latest")
     public QuoteFreshnessView latestQuote(@PathVariable String ticker) {

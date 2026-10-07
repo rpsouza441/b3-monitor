@@ -2,6 +2,8 @@ package dev.b3monitor.persistence;
 
 import dev.b3monitor.domain.rule.Comparator;
 import dev.b3monitor.domain.rule.RuleMode;
+import dev.b3monitor.admin.AdminAuditEvent.Action;
+import dev.b3monitor.admin.AdminAuditEvent.Outcome;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,13 +31,15 @@ public class RuleAdminService {
     private final RuleDefinitionRepository repo;
     private final RuleStateRepository ruleStates;
     private final OutboxTxOps outboxTx;
+    private final dev.b3monitor.admin.AdminAuditService audit;
     private final Clock clock;
 
     public RuleAdminService(RuleDefinitionRepository repo, RuleStateRepository ruleStates,
-                            OutboxTxOps outboxTx, Clock clock) {
+                            OutboxTxOps outboxTx, dev.b3monitor.admin.AdminAuditService audit, Clock clock) {
         this.repo = repo;
         this.ruleStates = ruleStates;
         this.outboxTx = outboxTx;
+        this.audit = audit;
         this.clock = clock;
     }
 
@@ -48,8 +52,10 @@ public class RuleAdminService {
             throw new IllegalStateException("rule already exists: " + ruleId);
         }
         // Created UNSELECTED (fail-closed) — a human must selectMode before it operates.
-        return repo.save(new RuleDefinitionEntity(
+        RuleDefinitionEntity saved = repo.save(new RuleDefinitionEntity(
                 ruleId, ticker, comparator, threshold, precision, hysteresis, clock.instant()));
+        audit.record(Action.CREATE_RULE, ruleId, null, saved.getRevision(), Outcome.SUCCESS, "created UNSELECTED");
+        return saved;
     }
 
     /**
@@ -63,11 +69,16 @@ public class RuleAdminService {
                      int precision, BigDecimal hysteresis) {
         RuleDefinitionEntity e = lock(ruleId);
         if (e.getRevision() != expectedRevision) {
+            // audit the rejection in a separate tx (the business tx carries no change)
+            audit.recordRejection(Action.EDIT_RULE, ruleId, e.getRevision(), Outcome.REJECTED_CONFLICT,
+                    "stale expectedRevision " + expectedRevision + " != " + e.getRevision());
             throw new StaleRevisionException(ruleId, expectedRevision, e.getRevision());
         }
+        long before = e.getRevision();
         long rev = e.applyEdit(comparator, threshold, precision, hysteresis, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "superseded-by-edit-rev" + rev);
+        audit.record(Action.EDIT_RULE, ruleId, before, rev, Outcome.SUCCESS, "edited typed definition");
         return rev;
     }
 
@@ -81,11 +92,15 @@ public class RuleAdminService {
     public long selectMode(String ruleId, RuleMode mode) {
         RuleDefinitionEntity e = lock(ruleId);
         if (mode != null && mode == e.getMode()) {
+            audit.record(Action.SELECT_MODE, ruleId, e.getRevision(), e.getRevision(), Outcome.NO_OP,
+                    "mode already " + mode);
             return e.getRevision();                     // idempotent desired-state no-op (no revision bump)
         }
+        long before = e.getRevision();
         long rev = e.selectMode(mode, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "superseded-by-mode-change-rev" + rev);
+        audit.record(Action.SELECT_MODE, ruleId, before, rev, Outcome.SUCCESS, "mode -> " + mode);
         return rev;
     }
 
@@ -96,10 +111,14 @@ public class RuleAdminService {
     @Transactional
     public void pause(String ruleId) {
         RuleDefinitionEntity e = lock(ruleId);
-        if (e.isPaused()) { return; }                   // idempotent
+        if (e.isPaused()) {
+            audit.record(Action.PAUSE, ruleId, e.getRevision(), e.getRevision(), Outcome.NO_OP, "already paused");
+            return;                                     // idempotent
+        }
         e.setPaused(true, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "paused");
+        audit.record(Action.PAUSE, ruleId, e.getRevision(), e.getRevision(), Outcome.SUCCESS, "paused; unsent PENDING cancelled");
     }
 
     /**
@@ -111,19 +130,27 @@ public class RuleAdminService {
     @Transactional
     public void resume(String ruleId) {
         RuleDefinitionEntity e = lock(ruleId);
-        if (!e.isPaused()) { return; }                  // idempotent: no second rebaseline marking
+        if (!e.isPaused()) {
+            audit.record(Action.RESUME, ruleId, e.getRevision(), e.getRevision(), Outcome.NO_OP, "already active");
+            return;                                     // idempotent: no second rebaseline marking
+        }
         e.setPaused(false, clock.instant());
         repo.save(e);
         ruleStates.findByRuleId(ruleId).ifPresent(rs -> { rs.markRebaselineRequired(); ruleStates.save(rs); });
+        audit.record(Action.RESUME, ruleId, e.getRevision(), e.getRevision(), Outcome.SUCCESS, "resumed; rebaseline marker set");
     }
 
     @Transactional
     public void disable(String ruleId) {
         RuleDefinitionEntity e = lock(ruleId);
-        if (!e.isEnabled()) { return; }                 // idempotent
+        if (!e.isEnabled()) {
+            audit.record(Action.DISABLE, ruleId, e.getRevision(), e.getRevision(), Outcome.NO_OP, "already disabled");
+            return;                                     // idempotent
+        }
         e.setEnabled(false, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "disabled");
+        audit.record(Action.DISABLE, ruleId, e.getRevision(), e.getRevision(), Outcome.SUCCESS, "disabled; unsent PENDING cancelled");
     }
 
     @Transactional(readOnly = true)

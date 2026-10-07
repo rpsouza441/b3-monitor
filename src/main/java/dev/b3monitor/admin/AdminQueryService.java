@@ -24,20 +24,22 @@ public class AdminQueryService {
     private final OutboxReconciliationService reconciliation;
     private final OutboxRepository outbox;
     private final QuoteObservationRepository observations;
+    private final AdminAuditRepository auditRepo;
     private final TradingSessionCalendar calendar;
     private final Clock clock;
     private final boolean workersEnabled;
 
     public AdminQueryService(RuleAdminService rules, RuleDefinitionRepository ruleDefs,
                              OutboxReconciliationService reconciliation, OutboxRepository outbox,
-                             QuoteObservationRepository observations, TradingSessionCalendar calendar,
-                             Clock clock,
+                             QuoteObservationRepository observations, AdminAuditRepository auditRepo,
+                             TradingSessionCalendar calendar, Clock clock,
                              @Value("${b3monitor.workers.enabled:false}") boolean workersEnabled) {
         this.rules = rules;
         this.ruleDefs = ruleDefs;
         this.reconciliation = reconciliation;
         this.outbox = outbox;
         this.observations = observations;
+        this.auditRepo = auditRepo;
         this.calendar = calendar;
         this.clock = clock;
         this.workersEnabled = workersEnabled;
@@ -72,23 +74,33 @@ public class AdminQueryService {
     }
 
     @Transactional(readOnly = true)
-    public ReconciliationView reconciliation() {
-        List<ReconciliationRowView> rows = reconciliation.deadLetters().stream()
+    public ReconciliationView reconciliation(int limit) {
+        List<ReconciliationRowView> rows = reconciliation.deadLetters(limit).stream()
                 .map(AdminQueryService::toReconciliationRow).toList();
         return new ReconciliationView(rows);
     }
 
     @Transactional(readOnly = true)
     public Optional<QuoteFreshnessView> latestQuote(String ticker) {
-        List<QuoteObservationEntity> rows = observations.findByRequestedTickerOrderByReceiptTimeDesc(ticker);
-        if (rows.isEmpty()) return Optional.empty();
-        QuoteObservationEntity o = rows.get(0);
-        Long ageSeconds = o.getSourceTime() == null ? null
-                : Duration.between(o.getSourceTime(), clock.instant()).getSeconds();
-        return Optional.of(new QuoteFreshnessView(
-                o.getRequestedTicker(), o.getReturnedTicker(), o.isProviderRemapped(), o.getCurrency(),
-                o.getPrice(), o.getSourceTime(), o.getReceiptTime(), o.isProviderStale(), o.isEligible(),
-                ageSeconds, o.getRejectionReasons(), o.getProviderContract()));
+        return observations.findFirstByRequestedTickerOrderByReceiptTimeDesc(ticker).map(o -> {
+            Long ageSeconds = o.getSourceTime() == null ? null
+                    : Duration.between(o.getSourceTime(), clock.instant()).getSeconds();
+            return new QuoteFreshnessView(
+                    o.getRequestedTicker(), o.getReturnedTicker(), o.isProviderRemapped(), o.getCurrency(),
+                    o.getPrice(), o.getSourceTime(), o.getReceiptTime(), o.isProviderStale(), o.isEligible(),
+                    ageSeconds, o.getRejectionReasons(), o.getProviderContract());
+        });
+    }
+
+    @Transactional(readOnly = true)
+    public List<dev.b3monitor.admin.AdminDtos.AuditEventView> audit(int limit) {
+        int capped = Math.max(1, Math.min(limit, 200));
+        return auditRepo.findByOrderByOccurredAtDescIdDesc(
+                        org.springframework.data.domain.PageRequest.of(0, capped)).stream()
+                .map(a -> new dev.b3monitor.admin.AdminDtos.AuditEventView(
+                        a.getOccurredAt(), a.getActor(), a.getAction().name(), a.getRuleId(),
+                        a.getBeforeRevision(), a.getAfterRevision(), a.getOutcome().name(), a.getDetail()))
+                .toList();
     }
 
     private static RuleView toRuleView(RuleDefinitionEntity e) {

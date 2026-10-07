@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @DataJpaTest
 @ActiveProfiles("test")
-@Import({PersistentRuleRegistry.class, RuleAdminService.class, PersistentRuleRegistryTest.Beans.class})
+@Import({PersistentRuleRegistry.class, RuleAdminService.class, dev.b3monitor.admin.AdminAuditService.class, PersistentRuleRegistryTest.Beans.class})
 class PersistentRuleRegistryTest {
 
     static final Instant NOW = Instant.parse("2026-10-06T17:00:00Z");

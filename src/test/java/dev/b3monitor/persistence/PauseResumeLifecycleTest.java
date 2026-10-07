@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @DataJpaTest
 @ActiveProfiles("test")
-@Import({OutboxService.class, RuleAdminService.class, PauseResumeLifecycleTest.Beans.class})
+@Import({OutboxService.class, RuleAdminService.class, dev.b3monitor.admin.AdminAuditService.class, PauseResumeLifecycleTest.Beans.class})
 class PauseResumeLifecycleTest {
 
     static final Instant NOW = Instant.parse("2026-10-06T17:00:00Z");

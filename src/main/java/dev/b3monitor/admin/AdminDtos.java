@@ -40,6 +40,9 @@ public final class AdminDtos {
                                      boolean providerStale, boolean eligible, Long ageSeconds,
                                      String rejectionReasons, String providerContract) {}
 
+    public record AuditEventView(Instant occurredAt, String actor, String action, String ruleId,
+                                 Long beforeRevision, Long afterRevision, String outcome, String detail) {}
+
     // ---- request models ----
 
     public record CreateRuleRequest(String ruleId, String ticker, Comparator comparator,
