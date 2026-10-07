@@ -33,10 +33,17 @@ public class AdminProperties {
      * Browser-session inactivity timeout in seconds (SEC-01, cycle-12 C). Safe bounded default of 30
      * minutes; NEVER infinite. A browser session idle longer than this can no longer access the private
      * UI/API — distinct from HTTP Basic, which re-authenticates whenever credentials are resent. The
-     * value is applied to {@code server.servlet.session.timeout} via {@link #effectiveSessionTimeout()}
-     * and shown in the operator status view.
+     * value is applied by the admin session listener and shown in the operator status view.
+     *
+     * <p>Cycle-13 P2: the effective value is genuinely BOUNDED — a non-positive value is coerced to the
+     * safe default, and a value above {@link #MAX_SESSION_TIMEOUT_SECONDS} (24h) is clamped down, so the
+     * window can never be effectively infinite.
      */
     private int sessionTimeoutSeconds = 1800;
+
+    /** Hard upper bound for the session timeout (24h) — the window is never effectively infinite. */
+    public static final int MAX_SESSION_TIMEOUT_SECONDS = 86_400;
+    private static final int DEFAULT_SESSION_TIMEOUT_SECONDS = 1800;
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -49,8 +56,13 @@ public class AdminProperties {
     public int getSessionTimeoutSeconds() { return sessionTimeoutSeconds; }
     public void setSessionTimeoutSeconds(int s) { this.sessionTimeoutSeconds = s; }
 
-    /** Effective, bounded session timeout; coerces a non-positive value to the safe default (never infinite). */
+    /**
+     * Effective, genuinely-bounded session timeout: a non-positive value → the 30-minute default; a value
+     * above the 24h hard cap → the cap. Never infinite.
+     */
     public java.time.Duration effectiveSessionTimeout() {
-        return java.time.Duration.ofSeconds(sessionTimeoutSeconds > 0 ? sessionTimeoutSeconds : 1800);
+        int s = sessionTimeoutSeconds <= 0 ? DEFAULT_SESSION_TIMEOUT_SECONDS
+                : Math.min(sessionTimeoutSeconds, MAX_SESSION_TIMEOUT_SECONDS);
+        return java.time.Duration.ofSeconds(s);
     }
 }
