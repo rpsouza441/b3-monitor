@@ -53,15 +53,17 @@ public final class AdminDtos {
                                      String rejectionReasons, String providerContract,
                                      String dailyIndicators, String pythonContext) {}
 
-    /** UI-03 (cycle-12 F): one logical alert + its transport state + bounded attempt lineage. ACCEPTED is
-     *  NOT delivery; UNKNOWN_OUTCOME is NOT delivered; FAILED/dead-letter is NOT delivered. */
+    /** UI-03 (cycle-12 F; completed cycle-13 P1-A): one logical alert + its transport state + bounded
+     *  attempt lineage, across the FULL lifecycle (not only dead-letters). ACCEPTED is NOT delivery;
+     *  {@code deliveryConfirmed} is separate; UNKNOWN_OUTCOME is NOT delivered; FAILED/CANCELLED/EXPIRED/
+     *  SUPPRESSED are NOT successful transport. */
     public record AlertOutcomeView(
             // logical alert
             String logicalKey, String ruleId, String ticker, long ruleRevision, long episodeEpoch,
             Instant sourceAsOf, Instant intentCreatedAt,
             // transport / channel state
-            String state, boolean deliveryConfirmed, String providerMessageId, String suppressionReason,
-            boolean uncertain,
+            String state, boolean deliveryConfirmed, Instant acceptedAt, String providerMessageId,
+            String suppressionReason, Instant sendStartedAt, Instant attemptFinishedAt, boolean uncertain,
             // attempt lineage (bounded)
             List<AttemptView> attempts) {}
 

@@ -147,14 +147,16 @@ public class AdminQueryService {
     }
 
     /**
-     * UI-03 (cycle-12 F): a BOUNDED set of logical alerts with their transport state and attempt lineage.
-     * Shows the actionable (UNKNOWN_OUTCOME/FAILED dead-letter) rows — the ones an operator inspects —
-     * each with its separate attempt rows. ACCEPTED != delivered; UNKNOWN_OUTCOME is flagged uncertain.
+     * UI-03 (completed cycle-13 P1-A): a BOUNDED, newest-first page of RECENT logical alerts across the
+     * FULL transport lifecycle (PENDING…SUPPRESSED), each with its separate transport state and bounded
+     * attempt lineage. Distinct from {@link #reconciliation(int)} (dead-letters only). ACCEPTED is shown
+     * even when {@code deliveryConfirmed=false}; UNKNOWN_OUTCOME is flagged uncertain. No payload/secret.
      */
     @Transactional(readOnly = true)
     public AlertOutcomeListView alertOutcomes(int limit) {
-        int capped = Math.max(1, Math.min(limit, 100));
-        List<AlertOutcomeView> alerts = reconciliation.deadLetters(capped).stream().map(o -> {
+        int capped = Math.max(1, Math.min(limit, 100));   // hard page-size cap
+        List<AlertOutcomeView> alerts = outbox.findRecentAlerts(
+                org.springframework.data.domain.PageRequest.of(0, capped)).stream().map(o -> {
             List<AttemptView> att = attempts.findByOutboxIdOrderByStartedAtAsc(o.getId()).stream()
                     .limit(20)   // bounded child attempts
                     .map(a -> new AttemptView(a.getClaimGeneration(), a.getFencingToken(), a.getStartedAt(),
@@ -164,7 +166,8 @@ public class AdminQueryService {
             boolean uncertain = o.getState() == dev.b3monitor.domain.outbox.OutboxState.UNKNOWN_OUTCOME;
             return new AlertOutcomeView(o.getLogicalKey(), o.getRuleId(), o.getTicker(), o.getRuleRevision(),
                     o.getEpisodeEpoch(), o.getSourceAsOf(), o.getIntentCreatedAt(), o.getState().name(),
-                    o.isDeliveryConfirmed(), o.getProviderMessageId(), o.getSuppressionReason(), uncertain, att);
+                    o.isDeliveryConfirmed(), o.getAcceptedAt(), o.getProviderMessageId(),
+                    o.getSuppressionReason(), o.getSendStartedAt(), o.getAttemptFinishedAt(), uncertain, att);
         }).toList();
         return new AlertOutcomeListView(alerts);
     }

@@ -16,18 +16,20 @@
     <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
   </nav>
   <h1>Logical alerts vs channel outcomes (UI-03)</h1>
-  <p><strong>ACCEPTED is not delivery confirmed. UNKNOWN_OUTCOME is not delivered. FAILED/dead-letter is not delivered.</strong>
-     The logical alert and each transport attempt are separate concepts.</p>
+  <p><strong>ACCEPTED is not delivery confirmed. UNKNOWN_OUTCOME is not delivered. FAILED/CANCELLED/EXPIRED/SUPPRESSED are not successful transport.</strong>
+     The logical alert and each transport attempt are separate concepts. All transport states are shown (full lifecycle, not only dead-letters).</p>
   <table>
     <tr><th>Logical key</th><th>Rule</th><th>Ticker</th><th>Rev</th><th>Episode</th><th>Source as-of</th>
-        <th>Intent created</th><th>Transport state</th><th>Delivery confirmed</th><th>Provider msg id</th>
-        <th>Reason</th><th>Uncertain</th></tr>
+        <th>Intent created</th><th>Transport state</th><th>Delivery confirmed</th><th>Accepted at</th>
+        <th>Send started</th><th>Attempt finished</th><th>Provider msg id</th><th>Reason</th><th>Uncertain</th></tr>
     <th:block th:each="al : ${alerts}">
       <tr>
         <td th:text="${al.logicalKey()}"></td><td th:text="${al.ruleId()}"></td><td th:text="${al.ticker()}"></td>
         <td th:text="${al.ruleRevision()}"></td><td th:text="${al.episodeEpoch()}"></td>
         <td th:text="${al.sourceAsOf()}"></td><td th:text="${al.intentCreatedAt()}"></td>
         <td th:text="${al.state()}"></td><td th:text="${al.deliveryConfirmed()}"></td>
+        <td th:text="${al.acceptedAt()}"></td><td th:text="${al.sendStartedAt()}"></td>
+        <td th:text="${al.attemptFinishedAt()}"></td>
         <td th:text="${al.providerMessageId()}"></td><td th:text="${al.suppressionReason()}"></td>
         <td th:classappend="${al.uncertain()} ? 'unc' : ''" th:text="${al.uncertain()} ? 'UNCERTAIN' : 'no'"></td>
       </tr>
@@ -36,9 +38,9 @@
         <td colspan="2" th:text="'started ' + ${at.startedAt()}"></td>
         <td colspan="2" th:text="'finished ' + ${at.finishedAt()}"></td>
         <td th:text="${at.outcome()}"></td>
-        <td colspan="2" th:text="${at.sanitizedStatus()}"></td>
+        <td colspan="3" th:text="${at.sanitizedStatus()}"></td>
         <td th:text="${at.providerMessageId()}"></td>
-        <td th:text="${at.providerAcceptedAt()}"></td>
+        <td colspan="2" th:text="${at.providerAcceptedAt()}"></td>
       </tr>
     </th:block>
   </table>

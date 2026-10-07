@@ -79,7 +79,16 @@ public interface OutboxRepository extends JpaRepository<OutboxEntity, Long> {
     List<OutboxEntity> findNeedingReconciliation(org.springframework.data.domain.Pageable pageable);
 
     /**
-     * Unsent (PENDING) rows for a rule whose {@code ruleRevision} is strictly below {@code newRevision}
+     * Cycle-13 P1-A: a BOUNDED, deterministic newest-first page of RECENT logical alerts across ALL
+     * transport states (PENDING/IN_FLIGHT/SENDING/ACCEPTED/UNKNOWN_OUTCOME/FAILED/CANCELLED/EXPIRED/
+     * SUPPRESSED) for the UI-03 lifecycle view. Ordered by id DESC (stable monotonic tie-break). The
+     * caller passes a hard-capped {@link org.springframework.data.domain.Pageable}; this is NOT a resend
+     * list and is distinct from the reconciliation (dead-letter) query.
+     */
+    @Query("select o from OutboxEntity o order by o.id desc")
+    List<OutboxEntity> findRecentAlerts(org.springframework.data.domain.Pageable pageable);
+
+    /** Unsent (PENDING) rows for a rule whose {@code ruleRevision} is strictly below {@code newRevision}
      * — the rows a revision bump must cancel (cycle-6 review P0-3). ACCEPTED/UNKNOWN/terminal rows are
      * excluded so audit evidence is preserved.
      */
