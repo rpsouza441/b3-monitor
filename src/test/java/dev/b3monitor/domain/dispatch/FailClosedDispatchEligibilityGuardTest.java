@@ -28,7 +28,8 @@ class FailClosedDispatchEligibilityGuardTest {
     }
 
     private RuleRegistry registry(long currentRev, boolean paused, boolean disabled) {
-        return ruleId -> Optional.of(new RuleRegistry.RuleStatus(ruleId, currentRev, paused, disabled));
+        return ruleId -> Optional.of(new RuleRegistry.RuleStatus(ruleId, currentRev, paused, disabled,
+                dev.b3monitor.domain.rule.RuleMode.CROSSING));
     }
 
     private FailClosedDispatchEligibilityGuard guard(OperationalAuthorization auth, RuleRegistry reg) {
@@ -88,5 +89,15 @@ class FailClosedDispatchEligibilityGuardTest {
         var g = guard(allowAsset, registry(1, false, false));
         assertEquals(DispatchEligibilityGuard.Denial.UNKNOWN,
                 g.evaluate(row(1, null, null), NOW).denial());
+    }
+
+    @Test
+    void unselectedModeFailsClosed() {
+        RuleRegistry unselected = ruleId -> Optional.of(new RuleRegistry.RuleStatus(
+                ruleId, 1, false, false, dev.b3monitor.domain.rule.RuleMode.UNSELECTED));
+        var g = guard(allowAsset, unselected);
+        assertEquals(DispatchEligibilityGuard.Denial.UNKNOWN,
+                g.evaluate(row(1, NOW.minusSeconds(60), null), NOW).denial(),
+                "an UNSELECTED-mode rule must never dispatch");
     }
 }

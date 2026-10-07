@@ -78,14 +78,21 @@ public class MonitorScheduler {
      * Run one tick over the given rules. A no-op (all-zero report) when the worker is disabled —
      * the default, so this never polls unless explicitly enabled.
      */
-    public TickReport tick(List<PriceRule> rules) {
+    /**
+     * Run one tick over an explicit rule list. PACKAGE-PRIVATE (cycle-8 review E): production MUST use
+     * {@link #tick()} which reads the single persistent {@link dev.b3monitor.domain.rule.RuleSource},
+     * so no runtime caller can inject stale/arbitrary rules and collect outside the registry. Retained
+     * for same-package tests that drive an explicit list.
+     */
+    TickReport tick(List<PriceRule> rules) {
         if (!enabled) {
             log.debug("scheduler disabled; tick is a no-op");
             return new TickReport(rules.size(), 0, 0, 0, 0, 0, 0, 0);
         }
         quota.confirmCycleRolloverIfElapsed();                   // only resets if an observed deadline elapsed
         quota.reconcileStranded();                               // flag (never reopen) a crash-stranded slot
-        int quarantined = dispatcher.reconcileExpiredLeases();   // ambiguous IN_FLIGHT → UNKNOWN_OUTCOME
+        int[] rec = dispatcher.reconcileExpiredLeases();         // [IN_FLIGHT→PENDING recovery, SENDING→UNKNOWN]
+        int quarantined = rec[1];
         int fetched = 0, skipped = 0, deniedAuth = 0, denied = 0, fired = 0;
 
         for (PriceRule rule : rules) {

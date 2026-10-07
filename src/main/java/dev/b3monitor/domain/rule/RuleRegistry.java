@@ -13,7 +13,7 @@ import java.util.Optional;
 public interface RuleRegistry {
 
     /** A registered rule's dispatch-relevant status. */
-    record RuleStatus(String ruleId, long currentRevision, boolean paused, boolean disabled) {}
+    record RuleStatus(String ruleId, long currentRevision, boolean paused, boolean disabled, RuleMode mode) {}
 
     /** The current status of {@code ruleId}, or empty when the rule is unknown (→ guard fails closed). */
     Optional<RuleStatus> status(String ruleId);

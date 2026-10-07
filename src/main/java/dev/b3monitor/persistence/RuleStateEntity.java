@@ -50,6 +50,15 @@ public class RuleStateEntity {
     @Column(name = "last_fired_at")
     private Instant lastFiredAt;
 
+    /**
+     * Comparison-continuity marker (cycle-7 review P0-live). Set true on an ordinary resume: the first
+     * eligible observation after a pause must NOT fire — it only re-establishes the baseline — because
+     * the FALSE→TRUE transition during the unobserved pause gap was never seen. Cleared once that fresh
+     * baseline is consumed.
+     */
+    @Column(name = "rebaseline_required", nullable = false)
+    private boolean rebaselineRequired = false;
+
     protected RuleStateEntity() {}
 
     public RuleStateEntity(String ruleId) { this.ruleId = ruleId; }
@@ -71,6 +80,14 @@ public class RuleStateEntity {
         if (sourceTime == null) { return false; }                 // no source time → cannot order → reject
         return lastProcessedSourceTime == null || sourceTime.isAfter(lastProcessedSourceTime);
     }
+
+    /** Request a fresh baseline (ordinary resume): the next eligible observation re-baselines, no fire. */
+    public void markRebaselineRequired() {
+        this.rebaselineRequired = true;
+        this.phase = RuleState.Phase.UNBASELINED;
+    }
+    public boolean isRebaselineRequired() { return rebaselineRequired; }
+    public void clearRebaselineRequired() { this.rebaselineRequired = false; }
 
     /** Outcome of reconciling an incoming rule revision against the persisted one (cycle-6 review P0-3). */
     public enum RevisionVerdict {

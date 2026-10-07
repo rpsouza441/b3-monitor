@@ -12,6 +12,7 @@ class OutboxTransitionsTest {
     void legalForwardEdges() {
         assertTrue(OutboxTransitions.isLegal(PENDING, IN_FLIGHT));
         assertTrue(OutboxTransitions.isLegal(IN_FLIGHT, SENDING));
+        assertTrue(OutboxTransitions.isLegal(IN_FLIGHT, PENDING), "safe pre-send recovery");
         assertTrue(OutboxTransitions.isLegal(SENDING, ACCEPTED));
         assertTrue(OutboxTransitions.isLegal(SENDING, UNKNOWN_OUTCOME));
         assertTrue(OutboxTransitions.isLegal(SENDING, FAILED));

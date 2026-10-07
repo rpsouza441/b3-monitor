@@ -91,6 +91,18 @@ public class MonitorProcessingService {
             return new MonitorPipeline.CycleResult(true, false, false, "UNKNOWN");
         }
 
+        // Ordinary-resume rebaseline (cycle-7 review P0-live): the FIRST eligible observation after a
+        // pause must NOT fire — it only re-establishes the baseline, because the FALSE→TRUE transition
+        // during the unobserved pause gap was never observed. The marker was set on resume (phase →
+        // UNBASELINED), so the evaluator already baselines rather than fires; we clear the marker and
+        // advance the clock, and force no-fire defensively.
+        if (entity.isRebaselineRequired()) {
+            entity.clearRebaselineRequired();
+            entity.updateFrom(entity.toDomain(), quote.sourceTime(), false, null);
+            ruleStates.save(entity);
+            return new MonitorPipeline.CycleResult(true, true, false, "REBASELINED_AFTER_RESUME");
+        }
+
         boolean fired = result.fired();
         entity.updateFrom(state, quote.sourceTime(), fired, fired ? clock.instant() : null);
         ruleStates.save(entity);

@@ -1,6 +1,7 @@
 package dev.b3monitor.persistence;
 
 import dev.b3monitor.domain.rule.Comparator;
+import dev.b3monitor.domain.rule.RuleMode;
 import dev.b3monitor.domain.rule.RuleRegistry;
 import dev.b3monitor.domain.rule.RuleSource;
 import org.junit.jupiter.api.Test;
@@ -18,9 +19,9 @@ import java.time.ZoneOffset;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Persistent typed rule registry (cycle-7 item E): the single source of truth for both the scheduler
- * (RuleSource) and the dispatch guard (RuleRegistry). Create/edit (immutable monotonic revision),
- * pause (removes from active AND reports paused), typed/bounded validation.
+ * Persistent typed rule registry (cycle-7 item E + cycle-8 RuleMode): single source of truth for the
+ * scheduler (RuleSource) and the dispatch guard (RuleRegistry). New rules default to UNSELECTED
+ * (fail-closed, not collected); an explicit CROSSING selection bumps the revision and makes it active.
  */
 @DataJpaTest
 @ActiveProfiles("test")
@@ -28,27 +29,47 @@ import static org.junit.jupiter.api.Assertions.*;
 class PersistentRuleRegistryTest {
 
     static final Instant NOW = Instant.parse("2026-10-06T17:00:00Z");
-    static class Beans { @Bean Clock clock() { return Clock.fixed(NOW, ZoneOffset.UTC); } }
+    static class Beans {
+        @Bean Clock clock() { return Clock.fixed(NOW, ZoneOffset.UTC); }
+        @Bean dev.b3monitor.domain.dispatch.DispatchEligibilityGuard guard() {
+            return (row, now) -> new dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Decision(
+                    dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Denial.OK);
+        }
+        @Bean OutboxTxOps outboxTxOps(OutboxRepository r, OutboxAttemptRepository ar,
+                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
+    }
 
     @Autowired RuleAdminService admin;
-    @Autowired PersistentRuleRegistry registry;   // implements both RuleSource and RuleRegistry
+    @Autowired PersistentRuleRegistry registry;   // RuleSource + RuleRegistry
 
     private void create(String id, String ticker) {
         admin.create(id, ticker, Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"));
     }
 
     @Test
-    void createdRuleIsActiveAndKnownToGuardAtRevisionOne() {
+    void newRuleIsUnselectedAndNotCollected() {
         create("r1", "WEGE3");
-        RuleSource src = registry;
-        assertEquals(1, src.activeRules().size());
-        assertEquals("WEGE3", src.activeRules().get(0).ticker());
-        assertEquals(1, src.activeRules().get(0).revision());
-        RuleRegistry reg = registry;
-        var st = reg.status("r1").orElseThrow();
+        assertTrue(registry.activeRules().isEmpty(), "UNSELECTED rule is not collected (fail-closed)");
+        var st = registry.status("r1").orElseThrow();
+        assertEquals(RuleMode.UNSELECTED, st.mode());
         assertEquals(1, st.currentRevision());
-        assertFalse(st.paused());
-        assertFalse(st.disabled());
+    }
+
+    @Test
+    void selectingCrossingBumpsRevisionAndActivates() {
+        create("r1", "WEGE3");
+        long rev = admin.selectMode("r1", RuleMode.CROSSING);
+        assertEquals(2, rev, "mode selection bumps the revision");
+        assertEquals(1, registry.activeRules().size());
+        assertEquals(RuleMode.CROSSING, registry.status("r1").orElseThrow().mode());
+        assertEquals(2, registry.activeRules().get(0).revision());
+    }
+
+    @Test
+    void levelModeIsRefused() {
+        create("r1", "WEGE3");
+        assertThrows(IllegalArgumentException.class, () -> admin.selectMode("r1", RuleMode.LEVEL),
+                "LEVEL is not activatable (Q-19 pending)");
     }
 
     @Test
@@ -59,30 +80,21 @@ class PersistentRuleRegistryTest {
     @Test
     void editBumpsRevisionAndNeverDecreases() {
         create("r1", "WEGE3");
-        long rev2 = admin.edit("r1", Comparator.ABOVE, new BigDecimal("55.00"), 2, new BigDecimal("0.10"));
-        assertEquals(2, rev2);
-        assertEquals(2, registry.status("r1").orElseThrow().currentRevision());
-        assertEquals(2, registry.activeRules().get(0).revision());
-        long rev3 = admin.edit("r1", Comparator.BELOW, new BigDecimal("40.00"), 2, BigDecimal.ZERO);
-        assertEquals(3, rev3, "revision is monotonic and never decreases");
+        admin.selectMode("r1", RuleMode.CROSSING);                 // rev 2
+        long rev3 = admin.edit("r1", Comparator.ABOVE, new BigDecimal("55.00"), 2, new BigDecimal("0.10"));
+        assertEquals(3, rev3);
+        assertEquals(3, registry.activeRules().get(0).revision());
     }
 
     @Test
     void pauseRemovesFromActiveAndReportsPausedToGuard() {
         create("r1", "WEGE3");
+        admin.selectMode("r1", RuleMode.CROSSING);
         admin.pause("r1");
         assertTrue(registry.activeRules().isEmpty(), "paused rule is not collected");
-        assertTrue(registry.status("r1").orElseThrow().paused(), "guard sees it paused (no dispatch)");
+        assertTrue(registry.status("r1").orElseThrow().paused(), "guard sees it paused");
         admin.resume("r1");
         assertEquals(1, registry.activeRules().size());
-    }
-
-    @Test
-    void disableRemovesFromActiveAndReportsDisabled() {
-        create("r1", "WEGE3");
-        admin.disable("r1");
-        assertTrue(registry.activeRules().isEmpty());
-        assertTrue(registry.status("r1").orElseThrow().disabled());
     }
 
     @Test
@@ -95,5 +107,12 @@ class PersistentRuleRegistryTest {
     void invalidThresholdRejected() {
         assertThrows(IllegalArgumentException.class,
                 () -> admin.create("bad", "WEGE3", Comparator.ABOVE, new BigDecimal("-1"), 2, BigDecimal.ZERO));
+    }
+
+    @Test
+    void thresholdScaleBeyondSixRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> admin.create("bad2", "WEGE3", Comparator.ABOVE, new BigDecimal("50.1234567"), 2, BigDecimal.ZERO),
+                "scale > 6 cannot round-trip NUMERIC(19,6)");
     }
 }

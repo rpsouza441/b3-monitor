@@ -105,8 +105,9 @@ public class OutboxDispatcher {
     /** Drain one bounded batch using the configured default (review F: no Integer.MAX_VALUE). */
     public int drainBatch() { return drain(defaultBatch); }
 
-    /** Quarantine expired-lease mid-attempt rows to UNKNOWN_OUTCOME (no resend). Returns count. */
-    public int reconcileExpiredLeases() {
+    /** Reconcile expired-lease rows: IN_FLIGHT→safe PENDING recovery, SENDING→UNKNOWN. Returns
+     *  {@code [recovered, quarantined]}. */
+    public int[] reconcileExpiredLeases() {
         return tx.reconcileExpiredLeases();
     }
 }

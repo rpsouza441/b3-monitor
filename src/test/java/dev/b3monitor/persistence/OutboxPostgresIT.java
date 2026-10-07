@@ -103,15 +103,22 @@ class OutboxPostgresIT {
     }
 
     @Test
-    void expiredLeaseIsQuarantinedNotResentOnRealPostgres() {
-        OutboxEntity row = newRow("it-crash");
-        row.claim("dead", NOW.minusSeconds(5));
-        row.setState(OutboxState.IN_FLIGHT);
-        outbox.save(row);
-        int q = dispatcher.reconcileExpiredLeases();
-        assertEquals(1, q);
-        assertEquals(OutboxState.UNKNOWN_OUTCOME, outbox.findByLogicalKey("it-crash").orElseThrow().getState());
-        assertTrue(dispatcher.dispatchOne().isEmpty(), "quarantined row is not claimable (PENDING-only)");
+    void expiredLeaseSendingQuarantinedInFlightRecoveredOnRealPostgres() {
+        OutboxEntity sending = newRow("it-sending");
+        sending.claim("dead", NOW.minusSeconds(5));
+        sending.markSending(NOW.minusSeconds(5));
+        sending.setState(OutboxState.SENDING);
+        outbox.save(sending);
+        OutboxEntity inflight = newRow("it-inflight");
+        inflight.claim("dead2", NOW.minusSeconds(5));
+        inflight.setState(OutboxState.IN_FLIGHT);
+        outbox.save(inflight);
+
+        int[] rec = dispatcher.reconcileExpiredLeases();
+        assertEquals(1, rec[0], "IN_FLIGHT → safe recovery");
+        assertEquals(1, rec[1], "SENDING → quarantined");
+        assertEquals(OutboxState.UNKNOWN_OUTCOME, outbox.findByLogicalKey("it-sending").orElseThrow().getState());
+        assertEquals(OutboxState.PENDING, outbox.findByLogicalKey("it-inflight").orElseThrow().getState());
     }
 
     @Test

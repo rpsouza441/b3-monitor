@@ -31,8 +31,9 @@ public class PersistentRuleRegistry implements RuleSource, RuleRegistry {
     @Transactional(readOnly = true)
     public List<PriceRule> activeRules() {
         return repo.findByEnabledTrueAndPausedFalse().stream()
+                .filter(e -> e.getMode().isOperable())   // UNSELECTED/LEVEL excluded (fail-closed)
                 .map(e -> new PriceRule(e.getRuleId(), e.getTicker(), e.getComparator(),
-                        e.getThreshold(), e.getPrecision(), e.getHysteresis(), e.getRevision()))
+                        e.getThreshold(), e.getPrecision(), e.getHysteresis(), e.getRevision(), e.getMode()))
                 .toList();
     }
 
@@ -40,6 +41,6 @@ public class PersistentRuleRegistry implements RuleSource, RuleRegistry {
     @Transactional(readOnly = true)
     public Optional<RuleStatus> status(String ruleId) {
         return repo.findByRuleId(ruleId)
-                .map(e -> new RuleStatus(e.getRuleId(), e.getRevision(), e.isPaused(), !e.isEnabled()));
+                .map(e -> new RuleStatus(e.getRuleId(), e.getRevision(), e.isPaused(), !e.isEnabled(), e.getMode()));
     }
 }

@@ -24,22 +24,30 @@ public record PriceRule(
         BigDecimal threshold,
         int precision,
         BigDecimal hysteresis,
-        long revision
+        long revision,
+        RuleMode mode
 ) {
     public PriceRule {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(ticker, "ticker");
         Objects.requireNonNull(comparator, "comparator");
         Objects.requireNonNull(threshold, "threshold");
+        Objects.requireNonNull(mode, "mode");
         if (precision < 0) throw new IllegalArgumentException("precision must be >= 0");
         if (hysteresis == null || hysteresis.signum() < 0)
             throw new IllegalArgumentException("hysteresis must be >= 0");
         if (revision < 1) throw new IllegalArgumentException("revision must be >= 1");
     }
 
-    /** Convenience constructor defaulting revision to 1. */
+    /** Convenience constructor defaulting revision to 1 and mode to CROSSING (test/legacy call sites). */
     public PriceRule(String id, String ticker, Comparator comparator,
                      BigDecimal threshold, int precision, BigDecimal hysteresis) {
-        this(id, ticker, comparator, threshold, precision, hysteresis, 1);
+        this(id, ticker, comparator, threshold, precision, hysteresis, 1, RuleMode.CROSSING);
+    }
+
+    /** Convenience constructor with an explicit revision, defaulting mode to CROSSING. */
+    public PriceRule(String id, String ticker, Comparator comparator,
+                     BigDecimal threshold, int precision, BigDecimal hysteresis, long revision) {
+        this(id, ticker, comparator, threshold, precision, hysteresis, revision, RuleMode.CROSSING);
     }
 }

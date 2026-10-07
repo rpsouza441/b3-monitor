@@ -12,6 +12,7 @@ import java.util.Optional;
 public interface OutboxRepository extends JpaRepository<OutboxEntity, Long> {
     Optional<OutboxEntity> findByLogicalKey(String logicalKey);
     List<OutboxEntity> findByState(OutboxState state);
+    List<OutboxEntity> findByRuleIdAndState(String ruleId, OutboxState state);
     boolean existsByLogicalKey(String logicalKey);
 
     /**

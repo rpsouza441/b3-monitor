@@ -13,7 +13,7 @@ import static dev.b3monitor.domain.outbox.OutboxState.*;
  * <p>Legal edges:
  * <pre>
  *   PENDING    → IN_FLIGHT, CANCELLED, EXPIRED, SUPPRESSED
- *   IN_FLIGHT  → SENDING, CANCELLED, EXPIRED, SUPPRESSED, UNKNOWN_OUTCOME   (quarantine of a stale claim)
+ *   IN_FLIGHT  → SENDING, PENDING (safe pre-send recovery), CANCELLED, EXPIRED, SUPPRESSED, UNKNOWN_OUTCOME
  *   SENDING    → ACCEPTED, UNKNOWN_OUTCOME, FAILED                          (only transport outcomes)
  *   UNKNOWN_OUTCOME → FAILED (operator abandon), PENDING (proof-gated requeue)
  *   FAILED     → FAILED (idempotent)
@@ -28,7 +28,7 @@ public final class OutboxTransitions {
 
     private static final Map<OutboxState, Set<OutboxState>> LEGAL = Map.of(
             PENDING,         Set.of(IN_FLIGHT, CANCELLED, EXPIRED, SUPPRESSED),
-            IN_FLIGHT,       Set.of(SENDING, CANCELLED, EXPIRED, SUPPRESSED, UNKNOWN_OUTCOME),
+            IN_FLIGHT,       Set.of(SENDING, PENDING, CANCELLED, EXPIRED, SUPPRESSED, UNKNOWN_OUTCOME),
             SENDING,         Set.of(ACCEPTED, UNKNOWN_OUTCOME, FAILED),
             UNKNOWN_OUTCOME, Set.of(FAILED, PENDING),
             FAILED,          Set.of(FAILED),

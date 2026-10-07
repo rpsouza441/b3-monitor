@@ -65,6 +65,9 @@ public class FailClosedDispatchEligibilityGuard implements DispatchEligibilityGu
         if (s.disabled() || s.paused()) {
             return new Decision(Denial.RULE_PAUSED_OR_DISABLED);
         }
+        if (s.mode() == null || !s.mode().isOperable()) {
+            return new Decision(Denial.UNKNOWN);               // UNSELECTED/LEVEL → fail closed
+        }
         if (row.getRuleRevision() != s.currentRevision()) {
             return new Decision(Denial.SUPERSEDED_REVISION);
         }

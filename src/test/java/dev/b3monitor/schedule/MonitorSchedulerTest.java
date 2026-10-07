@@ -49,7 +49,7 @@ class MonitorSchedulerTest {
         // worker ENABLED, calendar OPEN, quota would grant — authorization must still block the fetch.
         lenient().when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
         lenient().when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Granted(1L));
-        when(dispatcher.reconcileExpiredLeases()).thenReturn(0);
+        when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
 
         var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, authorization, src(), true);
@@ -67,7 +67,7 @@ class MonitorSchedulerTest {
     void unknownCalendarSkipsWithoutAcquiringQuotaOrFetching() {
         var auth = authorizingOnly("WEGE3");
         when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.UNKNOWN);
-        when(dispatcher.reconcileExpiredLeases()).thenReturn(0);
+        when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
         var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, auth, src(), true);
         var report = sched.tick(List.of(rule("WEGE3")));
@@ -84,7 +84,7 @@ class MonitorSchedulerTest {
         var auth = authorizingOnly("WEGE3");
         when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
         when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Denied("CONCURRENCY_BUSY"));
-        when(dispatcher.reconcileExpiredLeases()).thenReturn(0);
+        when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
         var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, auth, src(), true);
         var report = sched.tick(List.of(rule("WEGE3")));
@@ -99,7 +99,7 @@ class MonitorSchedulerTest {
         var auth = authorizingOnly("WEGE3");
         when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
         when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Granted(77L));
-        when(dispatcher.reconcileExpiredLeases()).thenReturn(0);
+        when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
         var rl = dev.b3monitor.adapter.brapi.BrapiException.rateLimited("429", 42L, 3600L, 10);
         when(pipeline.runOnce(any()))
@@ -119,7 +119,7 @@ class MonitorSchedulerTest {
         var auth = authorizingOnly("WEGE3");
         when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
         when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Granted(5L));
-        when(dispatcher.reconcileExpiredLeases()).thenReturn(0);
+        when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
         var sig = new dev.b3monitor.adapter.brapi.QuotaSignal(null, 7200L, 8000, 15000, "billing-cycle", null, null, false);
         when(pipeline.runOnce(any()))

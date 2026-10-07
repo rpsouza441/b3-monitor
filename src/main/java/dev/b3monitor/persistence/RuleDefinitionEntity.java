@@ -38,6 +38,11 @@ public class RuleDefinitionEntity {
     @Column(name = "comparator", nullable = false, length = 8)
     private Comparator comparator;
 
+    /** Evaluation mode. New rules default to UNSELECTED (fail-closed) until a human selects one. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "mode", nullable = false, length = 12)
+    private dev.b3monitor.domain.rule.RuleMode mode = dev.b3monitor.domain.rule.RuleMode.UNSELECTED;
+
     @Column(name = "threshold", nullable = false, precision = 19, scale = 6)
     private BigDecimal threshold;
 
@@ -94,16 +99,32 @@ public class RuleDefinitionEntity {
     public void setPaused(boolean p, Instant now) { this.paused = p; this.updatedAt = now; }
     public void setEnabled(boolean e, Instant now) { this.enabled = e; this.updatedAt = now; }
 
+    /** Select/change the evaluation mode: bumps the immutable revision. LEVEL is refused (Q-19 pending).
+     *  Returns the new revision. */
+    public long selectMode(dev.b3monitor.domain.rule.RuleMode newMode, Instant now) {
+        if (newMode == null || newMode == dev.b3monitor.domain.rule.RuleMode.UNSELECTED)
+            throw new IllegalArgumentException("cannot select UNSELECTED");
+        if (newMode == dev.b3monitor.domain.rule.RuleMode.LEVEL)
+            throw new IllegalArgumentException("LEVEL mode is not activatable (Q-19 policy pending)");
+        this.mode = newMode;
+        this.revision++;
+        this.updatedAt = now;
+        return this.revision;
+    }
+
     private static void validate(String ticker, Comparator comparator, BigDecimal threshold,
                                  int precision, BigDecimal hysteresis) {
         if (ticker == null || ticker.isBlank() || ticker.length() > 20)
             throw new IllegalArgumentException("ticker 1..20 chars required");
         if (comparator == null) throw new IllegalArgumentException("comparator required");
-        if (threshold == null || threshold.signum() <= 0 || threshold.precision() > 19)
-            throw new IllegalArgumentException("threshold must be > 0 and bounded");
-        if (precision < 0 || precision > 10) throw new IllegalArgumentException("precision 0..10");
-        if (hysteresis == null || hysteresis.signum() < 0)
-            throw new IllegalArgumentException("hysteresis must be >= 0");
+        // DB columns are NUMERIC(19,6): reject anything that could not round-trip losslessly.
+        if (threshold == null || threshold.signum() <= 0
+                || threshold.scale() > 6 || threshold.precision() - threshold.scale() > 13)
+            throw new IllegalArgumentException("threshold must be > 0 and fit NUMERIC(19,6) exactly");
+        if (precision < 0 || precision > 6) throw new IllegalArgumentException("precision 0..6");
+        if (hysteresis == null || hysteresis.signum() < 0
+                || hysteresis.scale() > 6 || hysteresis.precision() - hysteresis.scale() > 13)
+            throw new IllegalArgumentException("hysteresis must be >= 0 and fit NUMERIC(19,6) exactly");
     }
 
     public Long getId() { return id; }
@@ -111,6 +132,7 @@ public class RuleDefinitionEntity {
     public String getRuleId() { return ruleId; }
     public String getTicker() { return ticker; }
     public Comparator getComparator() { return comparator; }
+    public dev.b3monitor.domain.rule.RuleMode getMode() { return mode; }
     public BigDecimal getThreshold() { return threshold; }
     public int getPrecision() { return precision; }
     public BigDecimal getHysteresis() { return hysteresis; }

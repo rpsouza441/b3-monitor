@@ -41,11 +41,14 @@ public class OutboxTxOps {
     private static final Duration DEFAULT_LEASE = Duration.ofSeconds(30);
 
     private final OutboxRepository repo;
+    private final OutboxAttemptRepository attempts;
     private final DispatchEligibilityGuard eligibility;
     private final Clock clock;
 
-    public OutboxTxOps(OutboxRepository repo, DispatchEligibilityGuard eligibility, Clock clock) {
+    public OutboxTxOps(OutboxRepository repo, OutboxAttemptRepository attempts,
+                       DispatchEligibilityGuard eligibility, Clock clock) {
         this.repo = repo;
+        this.attempts = attempts;
         this.eligibility = eligibility;
         this.clock = clock;
     }
@@ -104,8 +107,11 @@ public class OutboxTxOps {
             return new Prepared(PrepareOutcome.DENIED_TERMINAL, terminal);
         }
         OutboxTransitions.requireLegal(row.getState(), OutboxState.SENDING);
-        row.markSending(now);                         // SENDING + send_started_at, committed below
+        row.markSending(now);                         // SENDING + send_started_at + attempt count, committed below
         repo.save(row);
+        // Append-only external-attempt ledger row (created only now that SENDING committed).
+        attempts.save(new OutboxAttemptEntity(
+                row.getId(), row.getLogicalKey(), row.getClaimGeneration(), row.getFencingToken(), now));
         return new Prepared(PrepareOutcome.AUTHORIZED, OutboxState.SENDING);
     }
 
@@ -132,6 +138,9 @@ public class OutboxTxOps {
         row.setState(mapped);
         row.recordAttemptResult(now, result.providerMessageId(), result.providerAcceptedAt());
         repo.save(row);
+        // Close the open attempt-ledger row for this claim generation (immutable thereafter).
+        attempts.findByOutboxIdAndClaimGeneration(rowId, row.getClaimGeneration())
+                .ifPresent(a -> { a.close(now, result); attempts.save(a); });
         return mapped;
     }
 
@@ -141,24 +150,34 @@ public class OutboxTxOps {
     }
 
     /**
-     * Quarantine expired-lease rows that are mid-attempt (IN_FLIGHT or SENDING) to
-     * {@code UNKNOWN_OUTCOME} WITHOUT resending, invalidating the old claim. A SENDING row may already
-     * have reached the provider, so it is AMBIGUOUS, never "not sent".
+     * Reconcile expired-lease mid-attempt rows (cycle-8 review P1/D). An expired {@code IN_FLIGHT} row
+     * never reached submission authority (no adapter call was possible before SENDING committed), so it
+     * is SAFE to recover: the claim is invalidated (fencing the slow worker) and the row returns to
+     * {@code PENDING} for a fresh claim + eligibility recheck. An expired {@code SENDING} row MAY have
+     * reached the provider, so it is AMBIGUOUS → {@code UNKNOWN_OUTCOME}, never retried blindly.
+     * Returns {@code [recovered, quarantined]}.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public int reconcileExpiredLeases() {
-        int n = 0;
+    public int[] reconcileExpiredLeases() {
+        int recovered = 0, quarantined = 0;
         for (OutboxEntity row : repo.findExpiredInFlightOrSending(clock.instant())) {
-            // IN_FLIGHT→UNKNOWN and SENDING→UNKNOWN are both legal; both are ambiguous after a crash.
-            OutboxTransitions.requireLegal(row.getState(), OutboxState.UNKNOWN_OUTCOME);
-            row.invalidateClaim();
-            row.setState(OutboxState.UNKNOWN_OUTCOME);
-            repo.save(row);
-            n++;
-            log.warn("outbox {} lease expired mid-attempt ({}) → UNKNOWN_OUTCOME (no resend)",
-                    row.getLogicalKey(), row.getState());
+            if (row.getState() == OutboxState.IN_FLIGHT) {
+                OutboxTransitions.requireLegal(OutboxState.IN_FLIGHT, OutboxState.PENDING);
+                row.invalidateClaim();                 // no external send happened; safe pre-send recovery
+                row.setState(OutboxState.PENDING);     // next claim rechecks eligibility
+                repo.save(row);
+                recovered++;
+                log.warn("outbox {} IN_FLIGHT lease expired (pre-send) → PENDING (safe recovery)", row.getLogicalKey());
+            } else { // SENDING
+                OutboxTransitions.requireLegal(OutboxState.SENDING, OutboxState.UNKNOWN_OUTCOME);
+                row.invalidateClaim();
+                row.setState(OutboxState.UNKNOWN_OUTCOME);
+                repo.save(row);
+                quarantined++;
+                log.warn("outbox {} SENDING lease expired (ambiguous) → UNKNOWN_OUTCOME (no resend)", row.getLogicalKey());
+            }
         }
-        return n;
+        return new int[]{recovered, quarantined};
     }
 
     /**
@@ -170,6 +189,25 @@ public class OutboxTxOps {
     public int cancelSupersededPending(String ruleId, long newRevision, String reason) {
         int n = 0;
         for (OutboxEntity row : repo.findPendingByRuleBelowRevision(ruleId, newRevision)) {
+            OutboxTransitions.requireLegal(row.getState(), OutboxState.CANCELLED);
+            row.invalidateClaim();
+            row.setSuppressionReason(reason);
+            row.setState(OutboxState.CANCELLED);
+            repo.save(row);
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * Cancel ALL unsent PENDING intents for a rule (any revision) — used on pause/disable/edit/mode
+     * change so an old episode cannot be sent after the lifecycle change (cycle-8 review P0-live).
+     * ACCEPTED/UNKNOWN/SENDING/terminal rows are preserved as evidence. Runs in the caller's tx.
+     */
+    @Transactional
+    public int cancelPendingForRule(String ruleId, String reason) {
+        int n = 0;
+        for (OutboxEntity row : repo.findByRuleIdAndState(ruleId, OutboxState.PENDING)) {
             OutboxTransitions.requireLegal(row.getState(), OutboxState.CANCELLED);
             row.invalidateClaim();
             row.setSuppressionReason(reason);

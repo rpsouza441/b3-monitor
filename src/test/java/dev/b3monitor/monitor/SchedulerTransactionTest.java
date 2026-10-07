@@ -99,9 +99,11 @@ class SchedulerTransactionTest {
     @Autowired OutboxRepository outbox;
     @Autowired CountingAdapter adapter;
     @Autowired BrapiQuotaManager quota;
+    @Autowired dev.b3monitor.persistence.RuleAdminService ruleAdmin;
+    @Autowired dev.b3monitor.persistence.RuleDefinitionRepository ruleDefs;
 
     private PriceRule rule() {
-        return new PriceRule("rT", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"));
+        return new PriceRule("rT", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 2);
     }
     private Quote wege(BigDecimal price, Instant src) {
         return new Quote("WEGE3", "WEGE3", false, "BRL", price, null, null, src, NOW, false);
@@ -112,11 +114,14 @@ class SchedulerTransactionTest {
 
     @BeforeEach
     void setup() {
-        outbox.deleteAll(); ruleStates.deleteAll(); observations.deleteAll();
+        outbox.deleteAll(); ruleStates.deleteAll(); observations.deleteAll(); ruleDefs.deleteAll();
         adapter.sends.set(0);
         reset(brapi);
         org.mockito.Mockito.doCallRealMethod().when(outboxServiceSpy).enqueue(any(AlertIntent.class));
         quota.declareDedicatedQuota();
+        // Seed the single rule source with a CROSSING rT/WEGE3 rule so scheduler.tick() collects it.
+        ruleAdmin.create("rT", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"));
+        ruleAdmin.selectMode("rT", dev.b3monitor.domain.rule.RuleMode.CROSSING);
     }
 
     @Test
@@ -129,7 +134,7 @@ class SchedulerTransactionTest {
     void workerPathCommitsAtomicallyAndDispatchesPostCommit() throws Exception {
         PriceRule rule = rule();
         when(brapi.fetch("WEGE3")).thenReturn(fr(new BigDecimal("49.00"), NOW.minusSeconds(60)));
-        scheduler.tick(List.of(rule));
+        scheduler.tick();
         assertEquals(1, observations.count());
         assertEquals(dev.b3monitor.domain.rule.RuleState.Phase.ARMED,
                 ruleStates.findByRuleId("rT").orElseThrow().getPhase());
@@ -137,7 +142,7 @@ class SchedulerTransactionTest {
         assertEquals(0, adapter.sends.get(), "no send on a non-firing cycle");
 
         when(brapi.fetch("WEGE3")).thenReturn(fr(new BigDecimal("50.50"), NOW.minusSeconds(30)));
-        var report = scheduler.tick(List.of(rule));
+        var report = scheduler.tick();
         assertEquals(1, report.fired());
         assertEquals(1, outbox.count());
         assertEquals(1, adapter.sends.get(), "exactly one post-commit send");
@@ -149,7 +154,7 @@ class SchedulerTransactionTest {
         PriceRule rule = rule();
         // baseline committed normally
         when(brapi.fetch("WEGE3")).thenReturn(fr(new BigDecimal("49.00"), NOW.minusSeconds(60)));
-        scheduler.tick(List.of(rule));
+        scheduler.tick();
         long obsAfterBaseline = observations.count();
         var phaseAfterBaseline = ruleStates.findByRuleId("rT").orElseThrow().getPhase();
         int sendsBefore = adapter.sends.get();
@@ -192,13 +197,13 @@ class SchedulerTransactionTest {
     void outOfOrderReplayDoesNotFireAgainViaWorkerPath() throws Exception {
         PriceRule rule = rule();
         when(brapi.fetch("WEGE3")).thenReturn(fr(new BigDecimal("49.00"), NOW.minusSeconds(120)));
-        scheduler.tick(List.of(rule));                                   // baseline ARMED
+        scheduler.tick();                                   // baseline ARMED
         when(brapi.fetch("WEGE3")).thenReturn(fr(new BigDecimal("50.50"), NOW.minusSeconds(60)));
-        scheduler.tick(List.of(rule));                                   // fire once
+        scheduler.tick();                                   // fire once
         assertEquals(1, outbox.count());
         // replay an OLDER observation
         when(brapi.fetch("WEGE3")).thenReturn(fr(new BigDecimal("50.90"), NOW.minusSeconds(120)));
-        scheduler.tick(List.of(rule));
+        scheduler.tick();
         assertEquals(1, outbox.count(), "out-of-order replay must not fire again");
     }
 }

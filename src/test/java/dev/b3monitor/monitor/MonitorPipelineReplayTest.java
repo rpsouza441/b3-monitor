@@ -45,8 +45,8 @@ class MonitorPipelineReplayTest {
             return (row, now) -> new dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Decision(
                     dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Denial.OK);
         }
-        @Bean OutboxTxOps outboxTxOps(OutboxRepository r,
-                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, Clock c) { return new OutboxTxOps(r, g, c); }
+        @Bean OutboxTxOps outboxTxOps(OutboxRepository r, OutboxAttemptRepository ar,
+                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
         @Bean MonitorProcessingService processing(QuoteValidator v, RuleEvaluator e,
                                                   QuoteObservationRepository o, RuleStateRepository rs,
                                                   OutboxService ob, OutboxTxOps otx, Clock c) {

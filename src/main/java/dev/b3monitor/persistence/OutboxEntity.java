@@ -144,13 +144,13 @@ public class OutboxEntity {
         this.createdAt = intentCreatedAt;
     }
 
-    /** Claim this row for dispatch: bump the fencing token AND the claim generation; set owner + lease. */
+    /** Claim this row for dispatch: bump the fencing token AND the claim generation; set owner + lease.
+     *  Does NOT count as an external attempt — that happens only when SENDING commits (markSending). */
     public long claim(String worker, Instant leaseUntil) {
         this.fencingToken++;
         this.claimGeneration++;
         this.claimedBy = worker;
         this.leaseUntil = leaseUntil;
-        this.attempts++;
         return this.fencingToken;
     }
 
@@ -176,10 +176,12 @@ public class OutboxEntity {
         return expiresAt != null && now.isAfter(expiresAt);
     }
 
-    /** Authorize submission: move IN_FLIGHT → SENDING and stamp the attempt start. Committed BEFORE I/O. */
+    /** Authorize submission: move IN_FLIGHT → SENDING, stamp the attempt start, and count ONE external
+     *  attempt. Committed BEFORE I/O. */
     public void markSending(Instant now) {
         this.state = OutboxState.SENDING;
         this.sendStartedAt = now;
+        this.attempts++;
     }
 
     /** Record a transport result's provenance (set by the dispatcher after the adapter call). */

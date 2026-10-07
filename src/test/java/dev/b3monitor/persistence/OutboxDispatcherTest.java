@@ -61,7 +61,7 @@ class OutboxDispatcherTest {
         @Bean Clock clock() { return Clock.fixed(NOW, ZoneOffset.UTC); }
         @Bean WahaOutboundAdapter adapter() { return new ProgrammableAdapter(); }
         @Bean ToggleGuard guard() { return new ToggleGuard(); }
-        @Bean OutboxTxOps txOps(OutboxRepository r, ToggleGuard g, Clock c) { return new OutboxTxOps(r, g, c); }
+        @Bean OutboxTxOps txOps(OutboxRepository r, OutboxAttemptRepository ar, ToggleGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
         @Bean OutboxDispatcher dispatcher(OutboxTxOps tx, WahaOutboundAdapter a, Clock c) {
             return new OutboxDispatcher(tx, a, c, 50);
         }
@@ -136,20 +136,37 @@ class OutboxDispatcherTest {
     }
 
     @Test
-    void expiredLeaseMidAttemptIsQuarantinedNotResent() {
+    void expiredLeaseSendingIsQuarantinedNotResent() {
         long staleToken = tx().execute(s -> {
             OutboxEntity row = newRow("ep-crash", 1);
             row.claim("dead", NOW.minusSeconds(5));
-            row.setState(OutboxState.SENDING);              // crashed mid-send
-            row.markSending(NOW.minusSeconds(5));
+            row.markSending(NOW.minusSeconds(5));           // crashed mid-send (SENDING)
+            row.setState(OutboxState.SENDING);
             return repo.save(row).getFencingToken();
         });
         int before = prog().sends.get();
-        assertEquals(1, dispatcher.reconcileExpiredLeases());
+        int[] rec = dispatcher.reconcileExpiredLeases();
+        assertEquals(0, rec[0]); assertEquals(1, rec[1], "SENDING crash → quarantined (ambiguous)");
         OutboxEntity after = repo.findByLogicalKey("ep-crash").orElseThrow();
-        assertEquals(OutboxState.UNKNOWN_OUTCOME, after.getState(), "SENDING crash is AMBIGUOUS, never 'not sent'");
+        assertEquals(OutboxState.UNKNOWN_OUTCOME, after.getState());
         assertEquals(before, prog().sends.get());
         assertTrue(after.getFencingToken() > staleToken, "claim invalidated");
+    }
+
+    @Test
+    void expiredLeaseInFlightIsSafelyRecoveredToPending() {
+        // IN_FLIGHT (pre-SENDING) crash: no external send was possible → safe recovery to PENDING.
+        long staleToken = tx().execute(s -> {
+            OutboxEntity row = newRow("ep-inflight", 1);
+            row.claim("dead", NOW.minusSeconds(5));
+            row.setState(OutboxState.IN_FLIGHT);
+            return repo.save(row).getFencingToken();
+        });
+        int[] rec = dispatcher.reconcileExpiredLeases();
+        assertEquals(1, rec[0], "IN_FLIGHT crash → safe recovery"); assertEquals(0, rec[1]);
+        OutboxEntity after = repo.findByLogicalKey("ep-inflight").orElseThrow();
+        assertEquals(OutboxState.PENDING, after.getState(), "recovered to PENDING for a fresh claim");
+        assertTrue(after.getFencingToken() > staleToken, "stale worker fenced out");
     }
 
     // ----- cycle-7 P0-1: eligibility→send TOCTOU closed by the SENDING authority gate -----
