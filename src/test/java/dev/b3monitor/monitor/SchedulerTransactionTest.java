@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.ActiveProfiles;
@@ -88,10 +88,10 @@ class SchedulerTransactionTest {
         }
     }
 
-    @MockBean BrapiClient brapi;
+    @MockitoBean BrapiClient brapi;
     /** Spied so one test can make enqueue() throw mid-transaction, after observation + rule-state writes.
-     *  @SpyBean wraps the REAL Spring bean (its repository stays injected). */
-    @org.springframework.boot.test.mock.mockito.SpyBean OutboxService outboxServiceSpy;
+     *  @MockitoSpyBean wraps the REAL Spring bean (its repository stays injected). */
+    @org.springframework.test.context.bean.override.mockito.MockitoSpyBean OutboxService outboxServiceSpy;
 
     @Autowired MonitorScheduler scheduler;
     @Autowired MonitorPipeline pipeline;

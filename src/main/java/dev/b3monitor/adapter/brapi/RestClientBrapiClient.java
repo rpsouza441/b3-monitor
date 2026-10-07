@@ -1,6 +1,6 @@
 package dev.b3monitor.adapter.brapi;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 import dev.b3monitor.domain.quote.Quote;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
