@@ -69,6 +69,14 @@ public class AdminController {
         return query.latestQuote(t).orElseThrow(() -> notFound("no observation for " + t));
     }
 
+    @GetMapping("/assets")
+    public AdminDtos.AssetFreshnessListView assets() { return query.assetFreshness(); }
+
+    @GetMapping("/alerts")
+    public AdminDtos.AlertOutcomeListView alerts(@RequestParam(name = "size", defaultValue = "50") int size) {
+        return query.alertOutcomes(size);   // service hard-caps size + child attempts
+    }
+
     // ---- mutations (ADMIN + CSRF) ----
 
     @PostMapping("/rules")

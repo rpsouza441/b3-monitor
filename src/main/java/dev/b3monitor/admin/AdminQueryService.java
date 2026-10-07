@@ -26,13 +26,20 @@ public class AdminQueryService {
     private final QuoteObservationRepository observations;
     private final AdminAuditRepository auditRepo;
     private final TradingSessionCalendar calendar;
+    private final AdminProperties adminProps;
+    private final dev.b3monitor.domain.auth.AssetCatalog catalog;
+    private final dev.b3monitor.domain.auth.OperationalAuthorization authorization;
+    private final OutboxAttemptRepository attempts;
     private final Clock clock;
     private final boolean workersEnabled;
 
     public AdminQueryService(RuleAdminService rules, RuleDefinitionRepository ruleDefs,
                              OutboxReconciliationService reconciliation, OutboxRepository outbox,
                              QuoteObservationRepository observations, AdminAuditRepository auditRepo,
-                             TradingSessionCalendar calendar, Clock clock,
+                             TradingSessionCalendar calendar, AdminProperties adminProps,
+                             dev.b3monitor.domain.auth.AssetCatalog catalog,
+                             dev.b3monitor.domain.auth.OperationalAuthorization authorization,
+                             OutboxAttemptRepository attempts, Clock clock,
                              @Value("${b3monitor.workers.enabled:false}") boolean workersEnabled) {
         this.rules = rules;
         this.ruleDefs = ruleDefs;
@@ -41,6 +48,10 @@ public class AdminQueryService {
         this.observations = observations;
         this.auditRepo = auditRepo;
         this.calendar = calendar;
+        this.adminProps = adminProps;
+        this.catalog = catalog;
+        this.authorization = authorization;
+        this.attempts = attempts;
         this.clock = clock;
         this.workersEnabled = workersEnabled;
     }
@@ -51,7 +62,8 @@ public class AdminQueryService {
         long active = ruleDefs.findByEnabledTrueAndPausedFalse().stream()
                 .filter(e -> e.getMode().isOperable()).count();
         String session = calendar.statusAt(clock.instant()).name();
-        return new StatusView(workersEnabled, calendar.datasetVersion(), session, total, active);
+        return new StatusView(workersEnabled, calendar.datasetVersion(), session, total, active,
+                adminProps.effectiveSessionTimeout().getSeconds());
     }
 
     @Transactional(readOnly = true)
@@ -101,6 +113,60 @@ public class AdminQueryService {
                         a.getOccurredAt(), a.getActor(), a.getAction().name(), a.getRuleId(),
                         a.getBeforeRevision(), a.getAfterRevision(), a.getOutcome().name(), a.getDetail()))
                 .toList();
+    }
+
+    /**
+     * UI-01 (cycle-12 E): one row per CANONICAL catalog asset (bounded — 23 single-row latest-observation
+     * lookups, no N+1 over history). No observation ⇒ an explicit UNKNOWN row. Daily indicators and Python
+     * context are NOT integrated, so they are reported as explicit readiness markers, never synthesized.
+     */
+    @Transactional(readOnly = true)
+    public AssetFreshnessListView assetFreshness() {
+        List<AssetFreshnessView> rows = catalog.tickers().stream().map(ticker -> {
+            String auth = authorization.evaluate(
+                    new dev.b3monitor.domain.rule.PriceRule("ui-probe", ticker,
+                            dev.b3monitor.domain.rule.Comparator.ABOVE, java.math.BigDecimal.ONE, 2,
+                            java.math.BigDecimal.ZERO, 1, dev.b3monitor.domain.rule.RuleMode.UNSELECTED)
+            ).status().name();
+            var obsOpt = observations.findFirstByRequestedTickerOrderByReceiptTimeDesc(ticker);
+            if (obsOpt.isEmpty()) {
+                return new AssetFreshnessView(ticker, auth, false, null, null, false, null, null, null,
+                        null, null, false, false, "NO_OBSERVATION_UNKNOWN", null,
+                        "NOT_INTEGRATED", "NOT_INTEGRATED");
+            }
+            var o = obsOpt.get();
+            Long age = o.getSourceTime() == null ? null
+                    : Duration.between(o.getSourceTime(), clock.instant()).getSeconds();
+            return new AssetFreshnessView(ticker, auth, true, o.getRequestedTicker(), o.getReturnedTicker(),
+                    o.isProviderRemapped(), o.getCurrency(), o.getPrice(), o.getSourceTime(), o.getReceiptTime(),
+                    age, o.isProviderStale(), o.isEligible(),
+                    o.getRejectionReasons() == null || o.getRejectionReasons().isBlank() ? "-" : o.getRejectionReasons(),
+                    o.getProviderContract(), "NOT_INTEGRATED", "NOT_INTEGRATED");
+        }).toList();
+        return new AssetFreshnessListView(rows);
+    }
+
+    /**
+     * UI-03 (cycle-12 F): a BOUNDED set of logical alerts with their transport state and attempt lineage.
+     * Shows the actionable (UNKNOWN_OUTCOME/FAILED dead-letter) rows — the ones an operator inspects —
+     * each with its separate attempt rows. ACCEPTED != delivered; UNKNOWN_OUTCOME is flagged uncertain.
+     */
+    @Transactional(readOnly = true)
+    public AlertOutcomeListView alertOutcomes(int limit) {
+        int capped = Math.max(1, Math.min(limit, 100));
+        List<AlertOutcomeView> alerts = reconciliation.deadLetters(capped).stream().map(o -> {
+            List<AttemptView> att = attempts.findByOutboxIdOrderByStartedAtAsc(o.getId()).stream()
+                    .limit(20)   // bounded child attempts
+                    .map(a -> new AttemptView(a.getClaimGeneration(), a.getFencingToken(), a.getStartedAt(),
+                            a.getFinishedAt(), a.getOutcome() == null ? null : a.getOutcome().name(),
+                            a.getSanitizedStatus(), a.getProviderMessageId(), a.getProviderAcceptedAt()))
+                    .toList();
+            boolean uncertain = o.getState() == dev.b3monitor.domain.outbox.OutboxState.UNKNOWN_OUTCOME;
+            return new AlertOutcomeView(o.getLogicalKey(), o.getRuleId(), o.getTicker(), o.getRuleRevision(),
+                    o.getEpisodeEpoch(), o.getSourceAsOf(), o.getIntentCreatedAt(), o.getState().name(),
+                    o.isDeliveryConfirmed(), o.getProviderMessageId(), o.getSuppressionReason(), uncertain, att);
+        }).toList();
+        return new AlertOutcomeListView(alerts);
     }
 
     private static RuleView toRuleView(RuleDefinitionEntity e) {

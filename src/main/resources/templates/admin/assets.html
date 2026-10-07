@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Assets</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:80rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%;font-size:.9rem}td,th{border:1px solid #ccc;padding:.25rem .4rem;text-align:left}form.inline{display:inline}.unk{color:#777}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/assets}">Assets</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/alerts}">Alerts</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Assets &amp; freshness (UI-01)</h1>
+  <p>Daily indicators and Python context are <strong>NOT_INTEGRATED</strong> — shown explicitly, never synthesized.</p>
+  <table>
+    <tr><th>Ticker</th><th>Auth</th><th>Price</th><th>Source time</th><th>Receipt time</th><th>Age (s)</th>
+        <th>Provider</th><th>Remapped</th><th>Ccy</th><th>Eligible</th><th>Stale</th><th>Rejection</th>
+        <th>Contract</th><th>Daily ind.</th><th>Python</th></tr>
+    <tr th:each="a : ${assets}">
+      <td th:text="${a.ticker()}"></td>
+      <td th:text="${a.authorizationStatus()}"></td>
+      <td th:if="${a.hasObservation()}" th:text="${a.price()}"></td>
+      <td th:unless="${a.hasObservation()}" class="unk">UNKNOWN</td>
+      <td th:text="${a.hasObservation()} ? ${a.sourceTime()} : 'UNKNOWN'" th:classappend="${a.hasObservation()} ? '' : 'unk'"></td>
+      <td th:text="${a.hasObservation()} ? ${a.receiptTime()} : 'UNKNOWN'"></td>
+      <td th:text="${a.ageSeconds() != null} ? ${a.ageSeconds()} : 'UNKNOWN'"></td>
+      <td th:text="${a.hasObservation()} ? ${a.providerContract()} : 'UNKNOWN'"></td>
+      <td th:text="${a.hasObservation()} ? ${a.remapped()} : 'UNKNOWN'"></td>
+      <td th:text="${a.hasObservation()} ? ${a.currency()} : 'UNKNOWN'"></td>
+      <td th:text="${a.hasObservation()} ? ${a.eligible()} : 'UNKNOWN'"></td>
+      <td th:text="${a.hasObservation()} ? ${a.providerStale()} : 'UNKNOWN'"></td>
+      <td th:text="${a.rejectionReasons()}"></td>
+      <td th:text="${a.providerContract()}"></td>
+      <td class="unk" th:text="${a.dailyIndicators()}">NOT_INTEGRATED</td>
+      <td class="unk" th:text="${a.pythonContext()}">NOT_INTEGRATED</td>
+    </tr>
+  </table>
+</body>
+</html>
