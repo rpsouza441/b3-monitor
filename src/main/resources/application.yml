@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: b3-monitor
+  datasource:
+    url: ${B3MONITOR_DB_URL:jdbc:postgresql://localhost:5432/b3monitor}
+    username: ${B3MONITOR_DB_USER:b3monitor}
+    password: ${B3MONITOR_DB_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: validate   # schema is owned by Flyway, never auto-generated
+    open-in-view: false
+    properties:
+      hibernate.format_sql: true
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+b3monitor:
+  # Workers start DISABLED. No unattended real-market polling without explicit enablement.
+  workers:
+    enabled: false
+  brapi:
+    base-url: https://brapi.dev/api
+    token: ${B3MONITOR_BRAPI_TOKEN:}   # injected from env; never committed
+  quote:
+    max-age-seconds: 2700   # 45-minute hard freshness guard
+    max-skew-seconds: 120
+
+logging:
+  level:
+    dev.b3monitor: INFO

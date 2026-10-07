@@ -1,1 +1,18 @@
-# b3-monitor
+# B3 Monitor
+
+Planejamento de monitor independente Java/Spring Boot e PostgreSQL para investimentos brasileiros. **Dez arquivos/23 linhas do CSV reconciliados.** **Implementação iniciada (2026-10-06) e endurecida (ciclos 5–6, 2026-10-07):** fatia vertical MVP com suíte verde (`mvn test` = 123) — correção de quota (`ratelimit-reset` tratado como prazo observado com proveniência de billing-cycle, nunca zera o orçamento), reserva de quota com fencing/recuperação, gate de autorização operacional por ativo, gate de elegibilidade pré-dispatch (fail-closed), fencing de resultado tardio no outbox, rejeição de revisão de regra regressiva e reconciliação local de outbox. Ver [DEVELOPMENT-HANDOFF](docs/handoff/DEVELOPMENT-HANDOFF.md). Isto NÃO conclui nem aprova nenhuma fase GSD: todos os 23 ativos permanecem `NOT_AUTHORIZED` (agora reforçado por gates executáveis na coleta E no dispatch), sem polling real, sem envio WAHA real, sem deploy.
+
+Primeira entrega proposta após fase 4: **Brapi → validação → preço-alvo manual → PostgreSQL/outbox → WAHA**, com autenticação, quota, deduplicação, incerteza e recuperação. A fase 5A adiciona variação percentual validada e AND/OR; a 5B acrescenta SMA/RSI/EMA9/21/volume diário. SMTP/comandos na fase 6; consumidor Java e produtor Python real separadamente autorizado na 7; dashboard completo na 8. Oito fases e 57 requisitos v1: 52 originais preservados, cinco adicionados. Volatilidade explicitamente proposta v2, pendente de aprovação.
+
+- [Reconciliação e decisões para aprovação](docs/planning/RECONCILIATION.md)
+- [Fontes, hashes e limites da evidência](docs/references/EVIDENCE.md), [catálogo dos 23 ativos](docs/planning/ASSET-CATALOG.md), [reaproveitamento Python](docs/planning/PYTHON-REUSE.md)
+- [Projeto GSD](.planning/PROJECT.md), [57 requisitos](.planning/REQUIREMENTS.md), [roadmap](.planning/ROADMAP.md), [estado](.planning/STATE.md)
+- [Especificação](docs/planning/SPEC.md), [contratos](docs/contracts/CONTRACTS.md), [arquitetura](docs/architecture/ARCHITECTURE.md), [ADRs](docs/architecture/ADRS.md), [divergências](docs/architecture/DESIGN-REVIEW.md)
+- [Revisão crítica de cobertura e dependências](docs/planning/CRITICAL-REVIEW.md)
+- [Questões](docs/planning/OPEN-QUESTIONS.md), [segurança](docs/SECURITY.md), [testes futuros](docs/TESTING-STRATEGY.md), [GSD](docs/planning/GSD-WORKFLOW.md), [validação documental](docs/planning/PLANNING-VALIDATION.md)
+
+CROSSING versus LEVEL inicial tem padrão pendente de aprovação. Fixtures sintéticos não comprovam cálculos Python reais; idade da cotação/coleta/aceite e entrega são métricas separadas, sem garantia de aviso em 60 minutos.
+
+Pendências: isolamento/contrato do WAHA compartilhado, possível quota Brapi compartilhada com scraper, categoria oficial de KNHY11, contrato WAHA, calendário/políticas/versões/backup e produtores de exportação. Contexto financeiro somente em v1 permanece uma escolha para aprovação. Scraper atual sem cache-only fica desabilitado; séries brutas/ajustadas não se combinam automaticamente.
+
+Próxima etapa: rodar a integração PostgreSQL/Flyway (Testcontainers) onde houver Docker e seguir o caminho vertical. Código e testes locais existem (`src/`, `mvn test` verde, **123 testes**; ciclo 6 adicionou fencing de resultado tardio no outbox, gate de elegibilidade pré-dispatch, rejeição de revisão de regra regressiva, proveniência de billing-cycle da quota e persistência da flag remapped); **sem** acesso a outros repositórios, credenciais ou serviços externos, **sem** polling real, **sem** mensagens WAHA reais, **sem** commits, migrações em DB externo ou deploy. Nenhuma fase GSD marcada como aprovada/concluída.
