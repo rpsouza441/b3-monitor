@@ -61,7 +61,7 @@ class OutboxDispatcherTest {
         @Bean Clock clock() { return Clock.fixed(NOW, ZoneOffset.UTC); }
         @Bean WahaOutboundAdapter adapter() { return new ProgrammableAdapter(); }
         @Bean ToggleGuard guard() { return new ToggleGuard(); }
-        @Bean OutboxTxOps txOps(OutboxRepository r, OutboxAttemptRepository ar, ToggleGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
+        @Bean OutboxTxOps txOps(OutboxRepository r, OutboxAttemptRepository ar, ToggleGuard g, RuleDefinitionRepository rd, Clock c) { return new OutboxTxOps(r, ar, g, rd, c); }
         @Bean OutboxDispatcher dispatcher(OutboxTxOps tx, WahaOutboundAdapter a, Clock c) {
             return new OutboxDispatcher(tx, a, c, 50);
         }

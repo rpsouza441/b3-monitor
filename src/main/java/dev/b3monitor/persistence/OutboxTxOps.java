@@ -43,13 +43,15 @@ public class OutboxTxOps {
     private final OutboxRepository repo;
     private final OutboxAttemptRepository attempts;
     private final DispatchEligibilityGuard eligibility;
+    private final RuleDefinitionRepository ruleDefs;
     private final Clock clock;
 
     public OutboxTxOps(OutboxRepository repo, OutboxAttemptRepository attempts,
-                       DispatchEligibilityGuard eligibility, Clock clock) {
+                       DispatchEligibilityGuard eligibility, RuleDefinitionRepository ruleDefs, Clock clock) {
         this.repo = repo;
         this.attempts = attempts;
         this.eligibility = eligibility;
+        this.ruleDefs = ruleDefs;
         this.clock = clock;
     }
 
@@ -92,6 +94,12 @@ public class OutboxTxOps {
         if (row.leaseExpired(now)) {
             return new Prepared(PrepareOutcome.GONE, row.getState());  // lease lost before authority
         }
+        // LIFECYCLE FENCE (cycle-10 item A): acquire the PESSIMISTIC_WRITE lock on this rule's definition
+        // row BEFORE the eligibility decision, so a concurrent admin pause/edit/disable is linearized. If
+        // pause locked first, we block here, then the guard below reads the committed paused state and
+        // denies (zero adapter calls). If we lock first, SENDING commits and the pause waits — the side
+        // effect is then legitimately already-authorized and pause cannot rewrite that history.
+        ruleDefs.findByRuleIdForUpdate(row.getRuleId());   // fence only; the guard reads via RuleRegistry
         var decision = eligibility.evaluate(row, now);
         if (!decision.mayDispatch()) {
             OutboxState terminal = switch (decision.denial()) {

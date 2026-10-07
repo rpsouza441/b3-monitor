@@ -90,9 +90,15 @@ public class QuoteObservationEntity {
     }
 
     public Long getId() { return id; }
+    public String getProvider() { return provider; }
     public String getRequestedTicker() { return requestedTicker; }
+    public String getReturnedTicker() { return returnedTicker; }
     public boolean isProviderRemapped() { return providerRemapped; }
     public String getProviderContract() { return providerContract; }
+    public String getCurrency() { return currency; }
+    public BigDecimal getPrice() { return price; }
+    public BigDecimal getPreviousClose() { return previousClose; }
+    public boolean isProviderStale() { return providerStale; }
     public boolean isEligible() { return eligible; }
     public String getRejectionReasons() { return rejectionReasons; }
     public Instant getSourceTime() { return sourceTime; }

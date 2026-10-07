@@ -47,21 +47,33 @@ class MonitorPipelineReplayTest {
                     dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Denial.OK);
         }
         @Bean OutboxTxOps outboxTxOps(OutboxRepository r, OutboxAttemptRepository ar,
-                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
+                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, RuleDefinitionRepository rd, Clock c) { return new OutboxTxOps(r, ar, g, rd, c); }
         @Bean MonitorProcessingService processing(QuoteValidator v, RuleEvaluator e,
                                                   QuoteObservationRepository o, RuleStateRepository rs,
-                                                  OutboxService ob, OutboxTxOps otx, Clock c) {
-            return new MonitorProcessingService(v, e, o, rs, ob, otx, c);
+                                                  OutboxService ob, OutboxTxOps otx, RuleDefinitionRepository rd, Clock c) {
+            return new MonitorProcessingService(v, e, o, rs, ob, otx, rd, c);
         }
     }
 
     @Autowired MonitorProcessingService pipeline;
     @Autowired OutboxRepository outbox;
     @Autowired RuleStateRepository ruleStates;
+    @Autowired RuleDefinitionRepository ruleDefs;
 
     private final PriceRule rule =
-            new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"))
+            new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 2)
                     .withMode(RuleMode.CROSSING);
+
+    /** Seed a rule_definition at EXACTLY the snapshot revision + CROSSING, so the cycle-10 fence passes
+     *  (create→rev1 UNSELECTED, selectMode→rev2, applyEdit up to target; target must be >= 2). */
+    private void seedDef(PriceRule r) {
+        ruleDefs.findByRuleId(r.id()).ifPresent(ruleDefs::delete);
+        ruleDefs.flush();
+        var e = new RuleDefinitionEntity(r.id(), r.ticker(), r.comparator(), r.threshold(), r.precision(), r.hysteresis(), NOW);
+        e.selectMode(RuleMode.CROSSING, NOW);
+        while (e.getRevision() < r.revision()) { e.applyEdit(r.comparator(), r.threshold(), r.precision(), r.hysteresis(), NOW); }
+        ruleDefs.saveAndFlush(e);
+    }
 
     private Quote at(BigDecimal price, Instant src) {
         return new Quote("WEGE3", "WEGE3", false, "BRL", price, null, null, src, NOW, false);
@@ -69,6 +81,7 @@ class MonitorPipelineReplayTest {
 
     @Test
     void outOfOrderReplayDoesNotFireAgain() {
+        seedDef(rule);
         Instant t1 = NOW.minusSeconds(120);
         Instant t2 = NOW.minusSeconds(60);
 
@@ -90,6 +103,7 @@ class MonitorPipelineReplayTest {
 
     @Test
     void duplicateSameTimestampIsRejected() {
+        seedDef(rule);
         Instant t = NOW.minusSeconds(60);
         pipeline.process(rule, at(new BigDecimal("49.00"), t.minusSeconds(1))); // baseline
         pipeline.process(rule, at(new BigDecimal("50.50"), t));                  // fire
@@ -101,6 +115,7 @@ class MonitorPipelineReplayTest {
 
     @Test
     void stateSurvivesPipelineRestart() {
+        seedDef(rule);
         Instant t1 = NOW.minusSeconds(120);
         pipeline.process(rule, at(new BigDecimal("49.00"), t1)); // baseline ARMED, persisted
 
@@ -117,34 +132,39 @@ class MonitorPipelineReplayTest {
 
     @Test
     void revisionBumpReBaselinesWithoutFiring() {
+        seedDef(rule);                                                              // def rev2
         pipeline.process(rule, at(new BigDecimal("49.00"), NOW.minusSeconds(120))); // ARMED
         pipeline.process(rule, at(new BigDecimal("50.50"), NOW.minusSeconds(90)));  // fire, LATCHED
         assertEquals(1, outbox.count());
 
-        // New revision with a different threshold: re-baseline, must NOT auto-fire even though above old.
-        PriceRule rev2 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 2).withMode(RuleMode.CROSSING);
-        var afterBump = pipeline.process(rev2, at(new BigDecimal("54.00"), NOW.minusSeconds(60)));
+        // New HIGHER revision with a different threshold: re-baseline, must NOT auto-fire even though
+        // above the old threshold. The def is advanced to the new revision (fence passes).
+        PriceRule rev3 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
+                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 3).withMode(RuleMode.CROSSING);
+        seedDef(rev3);
+        var afterBump = pipeline.process(rev3, at(new BigDecimal("54.00"), NOW.minusSeconds(60)));
         assertFalse(afterBump.fired(), "revision bump re-baselines, never auto-fires");
         assertEquals(1, outbox.count());
     }
 
-    // ----- cycle-6 P0-3: stale/lower revision fails closed; bump cancels old PENDING -----
+    // ----- cycle-6 P0-3 (reconcile) + cycle-10 fence: stale definition fails closed -----
 
     @Test
     void lowerIncomingRevisionIsRejectedStaleNoEvaluation() {
-        // establish revision 3 state
+        // establish revision 3 state + a matching def
         PriceRule rev3 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
                 new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 3).withMode(RuleMode.CROSSING);
+        seedDef(rev3);
         pipeline.process(rev3, at(new BigDecimal("49.00"), NOW.minusSeconds(120))); // ARMED @ rev3
         var armedPhase = ruleStates.findByRuleId("r1").orElseThrow().getPhase();
 
-        // a STALE lower revision arrives (rev1) that WOULD cross — must be rejected, no fire, no mutation
-        PriceRule rev1 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("40.00"), 2, new BigDecimal("0.10"), 1).withMode(RuleMode.CROSSING);
-        var stale = pipeline.process(rev1, at(new BigDecimal("50.50"), NOW.minusSeconds(60)));
+        // a STALE lower revision (rev2) that WOULD cross — the cycle-10 lifecycle fence rejects it
+        // (current def is rev3) BEFORE any evaluation: no fire, no mutation, no outbox.
+        PriceRule rev2 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
+                new BigDecimal("40.00"), 2, new BigDecimal("0.10"), 2).withMode(RuleMode.CROSSING);
+        var stale = pipeline.process(rev2, at(new BigDecimal("50.50"), NOW.minusSeconds(60)));
         assertFalse(stale.fired());
-        assertEquals("STALE_RULE_REVISION", stale.detail());
+        assertEquals("STALE_RULE_DEFINITION", stale.detail(), "fence rejects a snapshot below the current revision");
         assertEquals(3, ruleStates.findByRuleId("r1").orElseThrow().getRuleRevision(), "revision not downgraded");
         assertEquals(armedPhase, ruleStates.findByRuleId("r1").orElseThrow().getPhase(), "state not mutated");
         assertEquals(0, outbox.count());
@@ -152,18 +172,20 @@ class MonitorPipelineReplayTest {
 
     @Test
     void bumpCancelsOldPendingButPreservesAcceptedHistory() {
-        // rev1 fires → a PENDING outbox row for rev1
+        seedDef(rule);                                                              // def rev2
+        // rev2 fires → a PENDING outbox row for rev2
         pipeline.process(rule, at(new BigDecimal("49.00"), NOW.minusSeconds(180))); // ARMED
-        pipeline.process(rule, at(new BigDecimal("50.50"), NOW.minusSeconds(150))); // fire → PENDING rev1
-        var rev1Row = outbox.findAll().get(0);
-        assertEquals(dev.b3monitor.domain.outbox.OutboxState.PENDING, rev1Row.getState());
-        assertEquals(1, rev1Row.getRuleRevision());
+        pipeline.process(rule, at(new BigDecimal("50.50"), NOW.minusSeconds(150))); // fire → PENDING rev2
+        var oldRow = outbox.findAll().get(0);
+        assertEquals(dev.b3monitor.domain.outbox.OutboxState.PENDING, oldRow.getState());
+        assertEquals(2, oldRow.getRuleRevision());
 
-        // bump to rev2 → the unsent rev1 PENDING must be CANCELLED (superseded), not erased
-        PriceRule rev2 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 2).withMode(RuleMode.CROSSING);
-        pipeline.process(rev2, at(new BigDecimal("54.00"), NOW.minusSeconds(120)));
-        var afterBump = outbox.findByLogicalKey(rev1Row.getLogicalKey()).orElseThrow();
+        // bump to rev3 → the unsent old PENDING must be CANCELLED (superseded), not erased
+        PriceRule rev3 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
+                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 3).withMode(RuleMode.CROSSING);
+        seedDef(rev3);
+        pipeline.process(rev3, at(new BigDecimal("54.00"), NOW.minusSeconds(120)));
+        var afterBump = outbox.findByLogicalKey(oldRow.getLogicalKey()).orElseThrow();
         assertEquals(dev.b3monitor.domain.outbox.OutboxState.CANCELLED, afterBump.getState(),
                 "old-revision PENDING is cancelled on supersession");
         assertNotNull(afterBump.getSuppressionReason());

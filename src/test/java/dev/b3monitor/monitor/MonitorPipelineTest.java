@@ -44,11 +44,11 @@ class MonitorPipelineTest {
                     dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Denial.OK);
         }
         @Bean OutboxTxOps outboxTxOps(OutboxRepository r, OutboxAttemptRepository ar,
-                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
+                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, RuleDefinitionRepository rd, Clock c) { return new OutboxTxOps(r, ar, g, rd, c); }
         @Bean MonitorProcessingService processing(QuoteValidator v, RuleEvaluator e,
                                                    QuoteObservationRepository o, RuleStateRepository rs,
-                                                   OutboxService ob, OutboxTxOps otx, Clock c) {
-            return new MonitorProcessingService(v, e, o, rs, ob, otx, c);
+                                                   OutboxService ob, OutboxTxOps otx, RuleDefinitionRepository rd, Clock c) {
+            return new MonitorProcessingService(v, e, o, rs, ob, otx, rd, c);
         }
     }
 
@@ -56,9 +56,22 @@ class MonitorPipelineTest {
     @Autowired QuoteObservationRepository observations;
     @Autowired OutboxRepository outbox;
     @Autowired RuleStateRepository ruleStates;
+    @Autowired RuleDefinitionRepository ruleDefs;
+
+    /** Seed a rule_definition at EXACTLY the snapshot's revision + CROSSING mode, so the cycle-10
+     *  lifecycle fence in process() passes. create()→rev1 UNSELECTED, selectMode(CROSSING)→rev2, then
+     *  applyEdit up to the target. The snapshot's revision must therefore be >= 2. */
+    private void seedDef(PriceRule r) {
+        ruleDefs.findByRuleId(r.id()).ifPresent(ruleDefs::delete);
+        ruleDefs.flush();
+        var e = new RuleDefinitionEntity(r.id(), r.ticker(), r.comparator(), r.threshold(), r.precision(), r.hysteresis(), NOW);
+        e.selectMode(dev.b3monitor.domain.rule.RuleMode.CROSSING, NOW);   // rev 2
+        while (e.getRevision() < r.revision()) { e.applyEdit(r.comparator(), r.threshold(), r.precision(), r.hysteresis(), NOW); }
+        ruleDefs.saveAndFlush(e);
+    }
 
     private PriceRule rule() {
-        return new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"))
+        return new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 2)
                 .withMode(dev.b3monitor.domain.rule.RuleMode.CROSSING);
     }
 
@@ -68,6 +81,7 @@ class MonitorPipelineTest {
 
     @Test
     void ineligibleQuoteProducesNoFireButPersistsObservation() {
+        seedDef(rule());
         var r = processing.process(rule(), wege(new BigDecimal("99.00"), true, NOW.minusSeconds(60)));
         assertFalse(r.fired());
         assertFalse(r.eligible());
@@ -78,6 +92,7 @@ class MonitorPipelineTest {
     @Test
     void baselineThenCrossingFiresOnceAndEnqueuesPending() {
         PriceRule rule = rule();
+        seedDef(rule);
         assertFalse(processing.process(rule, wege(new BigDecimal("49.00"), false, NOW.minusSeconds(60))).fired());
         assertEquals(dev.b3monitor.domain.rule.RuleState.Phase.ARMED,
                 ruleStates.findByRuleId("r1").orElseThrow().getPhase());

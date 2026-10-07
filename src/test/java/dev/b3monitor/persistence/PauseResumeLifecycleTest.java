@@ -39,10 +39,10 @@ class PauseResumeLifecycleTest {
                     dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Denial.OK);
         }
         @Bean OutboxTxOps outboxTxOps(OutboxRepository r, OutboxAttemptRepository ar,
-                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
+                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, RuleDefinitionRepository rd, Clock c) { return new OutboxTxOps(r, ar, g, rd, c); }
         @Bean MonitorProcessingService processing(QuoteValidator v, RuleEvaluator e,
-                QuoteObservationRepository o, RuleStateRepository rs, OutboxService ob, OutboxTxOps otx, Clock c) {
-            return new MonitorProcessingService(v, e, o, rs, ob, otx, c);
+                QuoteObservationRepository o, RuleStateRepository rs, OutboxService ob, OutboxTxOps otx, RuleDefinitionRepository rd, Clock c) {
+            return new MonitorProcessingService(v, e, o, rs, ob, otx, rd, c);
         }
     }
 

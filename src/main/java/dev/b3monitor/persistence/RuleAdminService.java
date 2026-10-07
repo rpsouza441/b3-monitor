@@ -7,6 +7,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -51,40 +52,66 @@ public class RuleAdminService {
                 ruleId, ticker, comparator, threshold, precision, hysteresis, clock.instant()));
     }
 
+    /**
+     * Typed edit under the lifecycle fence (cycle-10 A) with an {@code expectedRevision} precondition
+     * (cycle-10 B / item D): applies exactly once at the expected revision and bumps it; a stale
+     * expectedRevision is a {@link StaleRevisionException} conflict with NO mutation (so an HTTP retry
+     * cannot blind-replay into another revision). {@code @Version} remains the DB concurrency guard.
+     */
     @Transactional
-    public long edit(String ruleId, Comparator comparator, BigDecimal threshold,
+    public long edit(String ruleId, long expectedRevision, Comparator comparator, BigDecimal threshold,
                      int precision, BigDecimal hysteresis) {
-        RuleDefinitionEntity e = require(ruleId);
+        RuleDefinitionEntity e = lock(ruleId);
+        if (e.getRevision() != expectedRevision) {
+            throw new StaleRevisionException(ruleId, expectedRevision, e.getRevision());
+        }
         long rev = e.applyEdit(comparator, threshold, precision, hysteresis, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "superseded-by-edit-rev" + rev);
         return rev;
     }
 
-    /** Select/change the evaluation mode (CROSSING; LEVEL refused). Bumps revision + cancels old PENDING. */
+    /**
+     * Select/change the evaluation mode under the fence. Retry-safe (cycle-10 B): selecting the
+     * ALREADY-CURRENT mode is an idempotent no-op that returns the current revision WITHOUT bumping it,
+     * so a duplicate HTTP request cannot mint an extra revision. A real mode change bumps the revision
+     * and cancels old PENDING. LEVEL is refused (Q-19 pending) by the entity.
+     */
     @Transactional
     public long selectMode(String ruleId, RuleMode mode) {
-        RuleDefinitionEntity e = require(ruleId);
+        RuleDefinitionEntity e = lock(ruleId);
+        if (mode != null && mode == e.getMode()) {
+            return e.getRevision();                     // idempotent desired-state no-op (no revision bump)
+        }
         long rev = e.selectMode(mode, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "superseded-by-mode-change-rev" + rev);
         return rev;
     }
 
-    /** Pause: block collection/dispatch AND cancel unsent PENDING intents (evidence preserved). */
+    /**
+     * Pause under the fence. Retry-safe (cycle-10 B): already-paused is an idempotent no-op (no revision
+     * mint, no re-cancel). A real active→paused transition cancels unsent PENDING (evidence preserved).
+     */
     @Transactional
     public void pause(String ruleId) {
-        RuleDefinitionEntity e = require(ruleId);
+        RuleDefinitionEntity e = lock(ruleId);
+        if (e.isPaused()) { return; }                   // idempotent
         e.setPaused(true, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "paused");
     }
 
-    /** Resume: keep revision/history, but require a fresh baseline so the first post-resume
-     *  observation cannot fire (no replay / no inferred crossing across the pause gap). */
+    /**
+     * Resume under the fence. Retry-safe (cycle-10 B / review P0): the {@code rebaseline_required} marker
+     * is set ONLY on the real paused→active transition — a duplicate/retried resume on an already-active
+     * rule is an idempotent no-op and MUST NOT re-mark rebaseline (which would consume a fresh-baseline
+     * window and could suppress a later legitimate crossing).
+     */
     @Transactional
     public void resume(String ruleId) {
-        RuleDefinitionEntity e = require(ruleId);
+        RuleDefinitionEntity e = lock(ruleId);
+        if (!e.isPaused()) { return; }                  // idempotent: no second rebaseline marking
         e.setPaused(false, clock.instant());
         repo.save(e);
         ruleStates.findByRuleId(ruleId).ifPresent(rs -> { rs.markRebaselineRequired(); ruleStates.save(rs); });
@@ -92,7 +119,8 @@ public class RuleAdminService {
 
     @Transactional
     public void disable(String ruleId) {
-        RuleDefinitionEntity e = require(ruleId);
+        RuleDefinitionEntity e = lock(ruleId);
+        if (!e.isEnabled()) { return; }                 // idempotent
         e.setEnabled(false, clock.instant());
         repo.save(e);
         outboxTx.cancelPendingForRule(ruleId, "disabled");
@@ -101,8 +129,28 @@ public class RuleAdminService {
     @Transactional(readOnly = true)
     public Optional<RuleDefinitionEntity> find(String ruleId) { return repo.findByRuleId(ruleId); }
 
+    @Transactional(readOnly = true)
+    public List<RuleDefinitionEntity> list() { return repo.findAll(); }
+
+    /** Acquire the shared lifecycle fence (PESSIMISTIC_WRITE) on the rule row, or fail if unknown. */
+    private RuleDefinitionEntity lock(String ruleId) {
+        return repo.findByRuleIdForUpdate(ruleId)
+                .orElseThrow(() -> new IllegalStateException("unknown rule: " + ruleId));
+    }
+
     private RuleDefinitionEntity require(String ruleId) {
         return repo.findByRuleId(ruleId)
                 .orElseThrow(() -> new IllegalStateException("unknown rule: " + ruleId));
+    }
+
+    /** Thrown when an edit's {@code expectedRevision} does not match the current revision (409 conflict). */
+    public static class StaleRevisionException extends RuntimeException {
+        public final long expected;
+        public final long actual;
+        public StaleRevisionException(String ruleId, long expected, long actual) {
+            super("stale expectedRevision for " + ruleId + ": expected " + expected + ", current " + actual);
+            this.expected = expected;
+            this.actual = actual;
+        }
     }
 }

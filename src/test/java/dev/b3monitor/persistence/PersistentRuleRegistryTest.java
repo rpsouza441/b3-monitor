@@ -36,7 +36,7 @@ class PersistentRuleRegistryTest {
                     dev.b3monitor.domain.dispatch.DispatchEligibilityGuard.Denial.OK);
         }
         @Bean OutboxTxOps outboxTxOps(OutboxRepository r, OutboxAttemptRepository ar,
-                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, Clock c) { return new OutboxTxOps(r, ar, g, c); }
+                dev.b3monitor.domain.dispatch.DispatchEligibilityGuard g, RuleDefinitionRepository rd, Clock c) { return new OutboxTxOps(r, ar, g, rd, c); }
     }
 
     @Autowired RuleAdminService admin;
@@ -81,7 +81,7 @@ class PersistentRuleRegistryTest {
     void editBumpsRevisionAndNeverDecreases() {
         create("r1", "WEGE3");
         admin.selectMode("r1", RuleMode.CROSSING);                 // rev 2
-        long rev3 = admin.edit("r1", Comparator.ABOVE, new BigDecimal("55.00"), 2, new BigDecimal("0.10"));
+        long rev3 = admin.edit("r1", 2, Comparator.ABOVE, new BigDecimal("55.00"), 2, new BigDecimal("0.10"));
         assertEquals(3, rev3);
         assertEquals(3, registry.activeRules().get(0).revision());
     }

@@ -43,8 +43,8 @@ class OutboxAttemptLedgerTest {
         @Bean DispatchEligibilityGuard guard() {
             return (row, now) -> new DispatchEligibilityGuard.Decision(DispatchEligibilityGuard.Denial.OK);
         }
-        @Bean OutboxTxOps txOps(OutboxRepository r, OutboxAttemptRepository ar, DispatchEligibilityGuard g, Clock c) {
-            return new OutboxTxOps(r, ar, g, c);
+        @Bean OutboxTxOps txOps(OutboxRepository r, OutboxAttemptRepository ar, DispatchEligibilityGuard g, RuleDefinitionRepository rd, Clock c) {
+            return new OutboxTxOps(r, ar, g, rd, c);
         }
         @Bean OutboxDispatcher dispatcher(OutboxTxOps tx, WahaOutboundAdapter a, Clock c) {
             return new OutboxDispatcher(tx, a, c, 50);

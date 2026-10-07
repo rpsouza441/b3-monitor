@@ -36,17 +36,20 @@ public class MonitorProcessingService {
     private final RuleStateRepository ruleStates;
     private final OutboxService outbox;
     private final OutboxTxOps outboxTx;
+    private final RuleDefinitionRepository ruleDefs;
     private final Clock clock;
 
     public MonitorProcessingService(QuoteValidator validator, RuleEvaluator evaluator,
                                     QuoteObservationRepository observations, RuleStateRepository ruleStates,
-                                    OutboxService outbox, OutboxTxOps outboxTx, Clock clock) {
+                                    OutboxService outbox, OutboxTxOps outboxTx,
+                                    RuleDefinitionRepository ruleDefs, Clock clock) {
         this.validator = validator;
         this.evaluator = evaluator;
         this.observations = observations;
         this.ruleStates = ruleStates;
         this.outbox = outbox;
         this.outboxTx = outboxTx;
+        this.ruleDefs = ruleDefs;
         this.clock = clock;
     }
 
@@ -60,7 +63,7 @@ public class MonitorProcessingService {
     @Transactional
     public MonitorPipeline.CycleResult process(PriceRule rule, Quote quote) {
         QuoteValidation v = validator.validate(quote);
-        persistObservation(quote, v);
+        persistObservation(quote, v);   // provenance is persisted even when evaluation is later denied
 
         // Mode gate (cycle-8 review C.6): a non-operable rule (UNSELECTED, or LEVEL pending Q-19) must
         // not mutate ANY runtime rule state and must never fire. Fail closed before loading/advancing
@@ -68,6 +71,24 @@ public class MonitorProcessingService {
         // RuleEvaluator mode gate.
         if (rule.mode() != dev.b3monitor.domain.rule.RuleMode.CROSSING) {
             return new MonitorPipeline.CycleResult(true, false, false, "NON_OPERABLE_MODE");
+        }
+
+        // LIFECYCLE FENCE (cycle-10 item A): the Brapi fetch happened OUTSIDE any transaction against a
+        // SNAPSHOT PriceRule. Before mutating rule_state or enqueuing an outbox row, acquire the shared
+        // PESSIMISTIC_WRITE lock on the rule_definition row and re-validate the snapshot against the
+        // CURRENT committed definition — fail closed on any divergence. An admin mutation that commits
+        // during the fetch either (a) locked first, so we observe its result here and refuse, or (b)
+        // locks after us and waits, then cancels any PENDING we create. No rule_state mutation, episode
+        // consumption, or outbox row is produced on a denied evaluation (the observation above stays, for
+        // provenance).
+        var defOpt = ruleDefs.findByRuleIdForUpdate(rule.id());
+        if (defOpt.isEmpty()) {
+            return new MonitorPipeline.CycleResult(true, v.eligible(), false, "STALE_RULE_DEFINITION");
+        }
+        RuleDefinitionEntity def = defOpt.get();
+        String fenceDenial = validateAgainstCurrentDefinition(rule, def);
+        if (fenceDenial != null) {
+            return new MonitorPipeline.CycleResult(true, v.eligible(), false, fenceDenial);
         }
 
         RuleStateEntity entity = ruleStates.findByRuleId(rule.id())
@@ -128,6 +149,29 @@ public class MonitorProcessingService {
                 quote.sourceTime(), clock.instant(), null /* no hard expiry by default */);
         outbox.enqueue(intent);   // PENDING only, in THIS transaction; dispatch is post-commit
         return new MonitorPipeline.CycleResult(true, true, true, "FIRED");
+    }
+
+    /**
+     * Fail-closed validation of the fetched SNAPSHOT {@code rule} against the CURRENT committed
+     * {@link RuleDefinitionEntity} (held under the lifecycle fence). Returns a typed denial reason, or
+     * {@code null} when the snapshot still matches the current definition and evaluation may proceed.
+     */
+    private String validateAgainstCurrentDefinition(PriceRule rule, RuleDefinitionEntity def) {
+        if (!def.isEnabled())  return "RULE_DISABLED_CURRENT";
+        if (def.isPaused())    return "RULE_PAUSED_CURRENT";
+        if (def.getRevision() != rule.revision()) return "STALE_RULE_DEFINITION";
+        if (def.getMode() != dev.b3monitor.domain.rule.RuleMode.CROSSING
+                || rule.mode() != dev.b3monitor.domain.rule.RuleMode.CROSSING) {
+            return "RULE_DEFINITION_MISMATCH";
+        }
+        // The immutable revision must correspond to the typed definition the snapshot carries.
+        boolean matches =
+                def.getTicker().equalsIgnoreCase(rule.ticker())
+                && def.getComparator() == rule.comparator()
+                && def.getThreshold().compareTo(rule.threshold()) == 0
+                && def.getPrecision() == rule.precision()
+                && def.getHysteresis().compareTo(rule.hysteresis()) == 0;
+        return matches ? null : "RULE_DEFINITION_MISMATCH";
     }
 
     private void persistObservation(Quote q, QuoteValidation v) {
