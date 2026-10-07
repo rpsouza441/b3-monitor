@@ -18,11 +18,16 @@ public interface OutboxRepository extends JpaRepository<OutboxEntity, Long> {
     /**
      * Rows a dispatcher may CLAIM for a first send: strictly {@code PENDING}.
      *
-     * <p>Cycle-4 review P0-2: an expired-lease {@code IN_FLIGHT} row is deliberately NOT claimable
-     * here. The adapter may already have been accepted by WAHA before the owner crashed, and the
-     * fencing token protects only the local DB write, not the external send — so re-claiming an
-     * IN_FLIGHT row would risk a duplicate real send. Expired IN_FLIGHT rows are instead reconciled
-     * to {@code UNKNOWN_OUTCOME} by {@link #findExpiredInFlight}, never resent.
+     * <p>Mid-attempt rows are never claimable here; they are handled by lease reconciliation
+     * ({@link #findExpiredInFlightOrSending}) per the cycle-8 state machine:
+     * <ul>
+     *   <li>{@code IN_FLIGHT} = PRE-SEND (claimed, but SENDING never committed, so no adapter call was
+     *       possible). An expired IN_FLIGHT lease is SAFELY RECOVERED to {@code PENDING} for a fresh
+     *       claim + eligibility recheck — there is provably no external side effect to duplicate.</li>
+     *   <li>{@code SENDING} = AMBIGUOUS (committed before I/O; the provider may already have accepted).
+     *       An expired SENDING lease is quarantined to {@code UNKNOWN_OUTCOME}, never resent blindly,
+     *       and its open attempt row is closed UNKNOWN.</li>
+     * </ul>
      */
     @Query("""
            select o from OutboxEntity o

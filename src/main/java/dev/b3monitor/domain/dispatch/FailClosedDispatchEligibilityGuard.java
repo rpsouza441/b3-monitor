@@ -3,6 +3,7 @@ package dev.b3monitor.domain.dispatch;
 import dev.b3monitor.domain.auth.OperationalAuthorization;
 import dev.b3monitor.domain.rule.Comparator;
 import dev.b3monitor.domain.rule.PriceRule;
+import dev.b3monitor.domain.rule.RuleMode;
 import dev.b3monitor.domain.rule.RuleRegistry;
 import dev.b3monitor.persistence.OutboxEntity;
 import org.springframework.beans.factory.annotation.Value;
@@ -82,8 +83,14 @@ public class FailClosedDispatchEligibilityGuard implements DispatchEligibilityGu
         return new Decision(Denial.OK);
     }
 
-    /** The authorization port keys on the ticker; wrap it in a minimal rule to reuse that policy. */
+    /**
+     * The authorization port keys only on the ticker; wrap it in a minimal, EXPLICITLY non-operational
+     * ({@link RuleMode#UNSELECTED}) rule so this authorization probe can never imply CROSSING semantics
+     * (cycle-8 review C). It is used solely to reach {@code authorization.evaluate(...)}; it is never
+     * evaluated by {@link dev.b3monitor.domain.rule.RuleEvaluator}.
+     */
     private static PriceRule syntheticRule(String ticker) {
-        return new PriceRule("dispatch-check", ticker, Comparator.ABOVE, BigDecimal.ONE, 2, BigDecimal.ZERO);
+        return new PriceRule("dispatch-check", ticker, Comparator.ABOVE, BigDecimal.ONE, 2,
+                BigDecimal.ZERO, 1, RuleMode.UNSELECTED);
     }
 }

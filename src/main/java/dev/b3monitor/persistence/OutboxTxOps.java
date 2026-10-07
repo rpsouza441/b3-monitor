@@ -134,13 +134,22 @@ public class OutboxTxOps {
             case DEFINITE_FAILURE -> OutboxState.FAILED;
             case UNKNOWN          -> OutboxState.UNKNOWN_OUTCOME;
         };
+        // INVARIANT (cycle-8 review E): prepareSend wrote SENDING + the attempt row in the same
+        // transaction, so an open attempt for this (rowId, claimGeneration) MUST exist. Its absence is
+        // a data-integrity breach — do NOT terminalize the outbox as if provenance were complete.
+        // Throw so this transaction rolls back (the row stays SENDING and is caught by lease
+        // reconciliation) rather than minting a coherent-looking terminal state with no attempt record.
+        OutboxAttemptEntity attempt = attempts
+                .findByOutboxIdAndClaimGeneration(rowId, row.getClaimGeneration())
+                .orElseThrow(() -> new IllegalStateException(
+                        "integrity breach: no attempt row for outbox " + rowId
+                                + " gen " + row.getClaimGeneration() + " while recording " + mapped));
         OutboxTransitions.requireLegal(row.getState(), mapped);
         row.setState(mapped);
         row.recordAttemptResult(now, result.providerMessageId(), result.providerAcceptedAt());
         repo.save(row);
-        // Close the open attempt-ledger row for this claim generation (immutable thereafter).
-        attempts.findByOutboxIdAndClaimGeneration(rowId, row.getClaimGeneration())
-                .ifPresent(a -> { a.close(now, result); attempts.save(a); });
+        attempt.close(now, result);     // the single OPEN → CLOSED transition; rejects a double close
+        attempts.save(attempt);
         return mapped;
     }
 
@@ -159,23 +168,69 @@ public class OutboxTxOps {
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int[] reconcileExpiredLeases() {
-        int recovered = 0, quarantined = 0;
+        int recovered = 0, quarantined = 0, integrityViolations = 0;
         for (OutboxEntity row : repo.findExpiredInFlightOrSending(clock.instant())) {
             if (row.getState() == OutboxState.IN_FLIGHT) {
+                // Pre-send: no SENDING ever committed, so by the attempt-ledger invariant there must be
+                // NO external attempt row for this claim generation. If one exists, the ledger is
+                // corrupt — fail closed (quarantine as UNKNOWN) rather than recover and hide it.
+                boolean hasAttempt = attempts
+                        .findByOutboxIdAndClaimGeneration(row.getId(), row.getClaimGeneration()).isPresent();
+                if (hasAttempt) {
+                    integrityViolations++;
+                    OutboxTransitions.requireLegal(OutboxState.IN_FLIGHT, OutboxState.UNKNOWN_OUTCOME);
+                    row.invalidateClaim();
+                    row.setSuppressionReason("integrity-attempt-present-on-inflight");
+                    row.setState(OutboxState.UNKNOWN_OUTCOME);
+                    repo.save(row);
+                    quarantined++;
+                    log.error("INTEGRITY: outbox {} IN_FLIGHT but an attempt row exists for gen {} → "
+                            + "quarantined UNKNOWN_OUTCOME (not recovered)", row.getLogicalKey(),
+                            row.getClaimGeneration());
+                    continue;
+                }
                 OutboxTransitions.requireLegal(OutboxState.IN_FLIGHT, OutboxState.PENDING);
                 row.invalidateClaim();                 // no external send happened; safe pre-send recovery
                 row.setState(OutboxState.PENDING);     // next claim rechecks eligibility
                 repo.save(row);
                 recovered++;
                 log.warn("outbox {} IN_FLIGHT lease expired (pre-send) → PENDING (safe recovery)", row.getLogicalKey());
-            } else { // SENDING
+            } else { // SENDING — ambiguous; close the open attempt UNKNOWN then quarantine the outbox.
+                Instant now = clock.instant();
+                OutboxAttemptEntity attempt = attempts
+                        .findByOutboxIdAndClaimGeneration(row.getId(), row.getClaimGeneration()).orElse(null);
+                if (attempt == null || !attempt.isOpen()) {
+                    // SENDING implies prepareSend wrote an OPEN attempt in the same tx; its absence or a
+                    // premature close is an integrity breach. Fail closed: quarantine, flag, do not
+                    // fabricate a coherent attempt history.
+                    integrityViolations++;
+                    OutboxTransitions.requireLegal(OutboxState.SENDING, OutboxState.UNKNOWN_OUTCOME);
+                    row.invalidateClaim();
+                    row.setSuppressionReason("integrity-missing-open-attempt-on-sending");
+                    row.setState(OutboxState.UNKNOWN_OUTCOME);
+                    repo.save(row);
+                    quarantined++;
+                    log.error("INTEGRITY: outbox {} SENDING lease expired but attempt row for gen {} is "
+                            + "{} → quarantined UNKNOWN_OUTCOME", row.getLogicalKey(),
+                            row.getClaimGeneration(), attempt == null ? "absent" : "already closed");
+                    continue;
+                }
+                // Close the attempt UNKNOWN with a sanitized reason; preserve any provider fields already
+                // present (never fabricate them) — the SubmissionResult.unknown carries none.
+                attempt.close(now, SubmissionResult.unknown("lease-expired"));
+                attempts.save(attempt);
                 OutboxTransitions.requireLegal(OutboxState.SENDING, OutboxState.UNKNOWN_OUTCOME);
                 row.invalidateClaim();
                 row.setState(OutboxState.UNKNOWN_OUTCOME);
                 repo.save(row);
                 quarantined++;
-                log.warn("outbox {} SENDING lease expired (ambiguous) → UNKNOWN_OUTCOME (no resend)", row.getLogicalKey());
+                log.warn("outbox {} SENDING lease expired (ambiguous) → UNKNOWN_OUTCOME; attempt gen {} "
+                        + "closed UNKNOWN (lease-expired, no resend)", row.getLogicalKey(), row.getClaimGeneration());
             }
+        }
+        if (integrityViolations > 0) {
+            log.error("outbox lease reconciliation observed {} attempt-ledger integrity violation(s)",
+                    integrityViolations);
         }
         return new int[]{recovered, quarantined};
     }

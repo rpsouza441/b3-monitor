@@ -128,4 +128,85 @@ class PauseResumeLifecycleTest {
         assertTrue(ruleStates.findByRuleId("r1").orElseThrow().isRebaselineRequired(),
                 "rebaseline marker is persisted across restart");
     }
+
+    /**
+     * Cycle-9 item A — the exact reproducer the review required. ARMED before pause; resume; first
+     * eligible post-resume is FALSE (establishes the fresh ARMED baseline, does not fire); the SECOND
+     * eligible is an actually-observed FALSE→TRUE crossing and fires once. The pre-fix bug discarded
+     * the first eligible comparison (persisting the stale UNBASELINED entity), so the second only
+     * baselined and the crossing was lost.
+     */
+    @Test
+    void armedPauseResume_firstFalseThenTrue_firesOnSecondEligible() {
+        long rev = seedCrossingRule();
+        processing.process(crossing(rev), q(new BigDecimal("49.00"), NOW.minusSeconds(180))); // ARMED
+        assertEquals(RuleState.Phase.ARMED, ruleStates.findByRuleId("r1").orElseThrow().getPhase());
+
+        admin.pause("r1");
+        admin.resume("r1");
+
+        // first eligible post-resume = FALSE → establishes fresh ARMED baseline, no fire, marker cleared
+        var first = processing.process(crossing(rev), q(new BigDecimal("49.50"), NOW.minusSeconds(120)));
+        assertFalse(first.fired(), "first post-resume FALSE does not fire");
+        assertEquals("REBASELINED_AFTER_RESUME", first.detail());
+        var rs = ruleStates.findByRuleId("r1").orElseThrow();
+        assertFalse(rs.isRebaselineRequired(), "marker consumed by the first eligible observation");
+        assertEquals(RuleState.Phase.ARMED, rs.getPhase(), "fresh baseline is ARMED (price below threshold)");
+        assertEquals(0, outbox.count());
+
+        // second eligible = observed FALSE→TRUE crossing → fires exactly once
+        var second = processing.process(crossing(rev), q(new BigDecimal("50.60"), NOW.minusSeconds(60)));
+        assertTrue(second.fired(), "the second eligible is a real observed crossing and fires");
+        assertEquals(1, outbox.countByState(OutboxState.PENDING));
+    }
+
+    /**
+     * Cycle-9 item B — ordinary resume preserves the LATCHED episode (CONTRACTS: resume keeps
+     * latch/episode state). The pre-fix markRebaselineRequired() forced phase=UNBASELINED, destroying
+     * the latch; now the phase is preserved and the first eligible observation evaluates against it.
+     */
+    @Test
+    void latchedBeforePause_isNotConvertedToUnbaselinedByResume() {
+        long rev = seedCrossingRule();
+        processing.process(crossing(rev), q(new BigDecimal("49.00"), NOW.minusSeconds(180))); // ARMED
+        processing.process(crossing(rev), q(new BigDecimal("50.50"), NOW.minusSeconds(150))); // fire → LATCHED
+        assertEquals(RuleState.Phase.LATCHED, ruleStates.findByRuleId("r1").orElseThrow().getPhase());
+        long epochBefore = ruleStates.findByRuleId("r1").orElseThrow().getEpisodeEpoch();
+
+        admin.pause("r1");
+        admin.resume("r1");
+        // latch is NOT destroyed merely by resume (marker set, phase preserved)
+        var rs = ruleStates.findByRuleId("r1").orElseThrow();
+        assertEquals(RuleState.Phase.LATCHED, rs.getPhase(), "resume preserves the LATCHED episode");
+        assertTrue(rs.isRebaselineRequired());
+
+        // first eligible TRUE after resume: stays LATCHED, no replay, no new episode minted
+        outbox.deleteAll();
+        var r = processing.process(crossing(rev), q(new BigDecimal("51.00"), NOW.minusSeconds(60)));
+        assertFalse(r.fired(), "LATCHED + first post-resume TRUE must not replay");
+        var after = ruleStates.findByRuleId("r1").orElseThrow();
+        assertEquals(RuleState.Phase.LATCHED, after.getPhase());
+        assertEquals(epochBefore, after.getEpisodeEpoch(), "resume does not mint a new episode epoch");
+        assertEquals(0, outbox.count());
+    }
+
+    /** Cycle-9 item B — an UNKNOWN (ineligible) observation after resume does NOT consume the marker
+     *  and does NOT touch the latch. */
+    @Test
+    void unknownAfterResumePreservesMarkerAndLatch() {
+        long rev = seedCrossingRule();
+        processing.process(crossing(rev), q(new BigDecimal("49.00"), NOW.minusSeconds(180))); // ARMED
+        processing.process(crossing(rev), q(new BigDecimal("50.50"), NOW.minusSeconds(150))); // LATCHED
+        admin.pause("r1");
+        admin.resume("r1");
+
+        // a stale quote (ineligible) → UNKNOWN: marker and latch must survive untouched
+        Quote stale = new Quote("WEGE3", "WEGE3", false, "BRL", new BigDecimal("51.00"), null, null,
+                NOW.minusSeconds(60), NOW, true /* providerStale */);
+        var r = processing.process(crossing(rev), stale);
+        assertEquals("UNKNOWN", r.detail());
+        var rs = ruleStates.findByRuleId("r1").orElseThrow();
+        assertTrue(rs.isRebaselineRequired(), "UNKNOWN must not consume the rebaseline marker");
+        assertEquals(RuleState.Phase.LATCHED, rs.getPhase(), "UNKNOWN must not touch the latch");
+    }
 }

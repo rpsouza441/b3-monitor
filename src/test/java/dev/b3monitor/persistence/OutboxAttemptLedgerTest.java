@@ -120,4 +120,61 @@ class OutboxAttemptLedgerTest {
         assertEquals("pm-2", rows.get(1).getProviderMessageId());
         assertEquals(2, repo.findById(id).orElseThrow().getAttempts(), "attempts counts external submissions");
     }
+
+    /**
+     * Cycle-9 item D — an expired SENDING lease closes its OPEN attempt as UNKNOWN (lease-expired) in
+     * the SAME reconciliation, so no attempt row is left dangling. A later proof-requeue then creates a
+     * SECOND attempt while the first stays finished-UNKNOWN and immutable.
+     */
+    @Test
+    void expiredSendingClosesAttemptUnknownThenRequeueAddsSecond() {
+        Long id = seed("ep-sending-expire");
+        // Simulate a crashed-mid-send row: SENDING + an OPEN attempt for this claim generation.
+        long gen1 = tx().execute(s -> {
+            var row = repo.findById(id).orElseThrow();
+            row.claim("dead", NOW.minusSeconds(5));
+            row.markSending(NOW.minusSeconds(5));
+            row.setState(OutboxState.SENDING);
+            repo.save(row);
+            attempts.save(new OutboxAttemptEntity(row.getId(), row.getLogicalKey(),
+                    row.getClaimGeneration(), row.getFencingToken(), NOW.minusSeconds(5)));
+            return row.getClaimGeneration();
+        });
+        assertTrue(attempts.findByOutboxIdAndClaimGeneration(id, gen1).orElseThrow().isOpen());
+
+        int[] rec = dispatcher.reconcileExpiredLeases();
+        assertEquals(0, rec[0]); assertEquals(1, rec[1], "SENDING crash → quarantined UNKNOWN");
+        assertEquals(OutboxState.UNKNOWN_OUTCOME, repo.findById(id).orElseThrow().getState());
+        var a1 = attempts.findByOutboxIdAndClaimGeneration(id, gen1).orElseThrow();
+        assertFalse(a1.isOpen(), "expired SENDING attempt is CLOSED, not left dangling");
+        assertEquals(SubmissionResult.Kind.UNKNOWN, a1.getOutcome());
+        assertEquals("lease-expired", a1.getSanitizedStatus());
+        assertNotNull(a1.getFinishedAt());
+
+        // proof-requeue → a fresh send creates a SECOND immutable attempt; the first stays UNKNOWN.
+        assertTrue(reconcile.markFailedAfterProofOfNonDelivery(id, true));
+        prog().next = SubmissionResult.accepted("pm-x", NOW);
+        dispatcher.dispatchOne();
+        var rows = attempts.findByOutboxIdOrderByStartedAtAsc(id);
+        assertEquals(2, rows.size(), "a second attempt row for the new generation");
+        assertEquals(SubmissionResult.Kind.UNKNOWN, rows.get(0).getOutcome(), "first attempt immutable UNKNOWN");
+    }
+
+    /** Cycle-9 item D — an expired IN_FLIGHT (pre-send) row has NO attempt row for its claim generation
+     *  and is safely recovered to PENDING (no external side effect was possible). */
+    @Test
+    void expiredInFlightHasNoAttemptAndRecoversToPending() {
+        Long id = seed("ep-inflight-noattempt");
+        long gen = tx().execute(s -> {
+            var row = repo.findById(id).orElseThrow();
+            row.claim("dead", NOW.minusSeconds(5));
+            row.setState(OutboxState.IN_FLIGHT);
+            return repo.save(row).getClaimGeneration();
+        });
+        assertEquals(0, attempts.countByOutboxId(id), "no attempt row for a pre-send IN_FLIGHT claim");
+        int[] rec = dispatcher.reconcileExpiredLeases();
+        assertEquals(1, rec[0], "safe recovery"); assertEquals(0, rec[1]);
+        assertEquals(OutboxState.PENDING, repo.findById(id).orElseThrow().getState());
+        assertEquals(0, attempts.countByOutboxId(id), "still no attempt row after recovery");
+    }
 }

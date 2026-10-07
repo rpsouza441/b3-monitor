@@ -58,7 +58,8 @@ class MonitorPipelineTest {
     @Autowired RuleStateRepository ruleStates;
 
     private PriceRule rule() {
-        return new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"));
+        return new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"))
+                .withMode(dev.b3monitor.domain.rule.RuleMode.CROSSING);
     }
 
     private Quote wege(BigDecimal price, boolean stale, Instant src) {

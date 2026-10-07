@@ -62,6 +62,14 @@ public class MonitorProcessingService {
         QuoteValidation v = validator.validate(quote);
         persistObservation(quote, v);
 
+        // Mode gate (cycle-8 review C.6): a non-operable rule (UNSELECTED, or LEVEL pending Q-19) must
+        // not mutate ANY runtime rule state and must never fire. Fail closed before loading/advancing
+        // the rule_state. This is defence-in-depth atop the scheduler/registry filters and the
+        // RuleEvaluator mode gate.
+        if (rule.mode() != dev.b3monitor.domain.rule.RuleMode.CROSSING) {
+            return new MonitorPipeline.CycleResult(true, false, false, "NON_OPERABLE_MODE");
+        }
+
         RuleStateEntity entity = ruleStates.findByRuleId(rule.id())
                 .orElseGet(() -> new RuleStateEntity(rule.id()));
 
@@ -91,14 +99,16 @@ public class MonitorProcessingService {
             return new MonitorPipeline.CycleResult(true, false, false, "UNKNOWN");
         }
 
-        // Ordinary-resume rebaseline (cycle-7 review P0-live): the FIRST eligible observation after a
-        // pause must NOT fire — it only re-establishes the baseline, because the FALSE→TRUE transition
-        // during the unobserved pause gap was never observed. The marker was set on resume (phase →
-        // UNBASELINED), so the evaluator already baselines rather than fires; we clear the marker and
-        // advance the clock, and force no-fire defensively.
+        // Ordinary-resume rebaseline (cycle-8 review A+B): the FIRST eligible observation after a pause
+        // must NOT fire — the FALSE→TRUE transition that may have happened during the unobserved pause
+        // gap was never seen, and an existing LATCHED episode is never replayed. The evaluator has
+        // already run against the PRESERVED phase and mutated `state` to the correct ARMED/LATCHED; we
+        // persist THAT mutated state (cycle-8 review A: the old code rebuilt from the stale UNBASELINED
+        // entity and discarded this first eligible comparison), force fired=false, clear the marker, and
+        // advance the clock — all atomically.
         if (entity.isRebaselineRequired()) {
             entity.clearRebaselineRequired();
-            entity.updateFrom(entity.toDomain(), quote.sourceTime(), false, null);
+            entity.updateFrom(state, quote.sourceTime(), false, null);
             ruleStates.save(entity);
             return new MonitorPipeline.CycleResult(true, true, false, "REBASELINED_AFTER_RESUME");
         }

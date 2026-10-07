@@ -30,7 +30,32 @@ class RuleEvaluatorTest {
     }
 
     private PriceRule aboveRule() {
-        return new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"));
+        return new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"))
+                .withMode(RuleMode.CROSSING);
+    }
+
+    // ---- Regression cycle-9 item C: the domain itself fails closed on a non-operable mode ----
+    @Test
+    void unselectedModeYieldsUnknownNoMutationNoFire() {
+        PriceRule unselected = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
+                new BigDecimal("50.00"), 2, new BigDecimal("0.10"));  // convenience ctor → UNSELECTED
+        assertEquals(RuleMode.UNSELECTED, unselected.mode());
+        RuleState state = new RuleState();
+        var r = evaluator.evaluate(unselected, state, wege(new BigDecimal("100.00"))); // would latch if CROSSING
+        assertEquals(RuleOutcome.UNKNOWN, r.outcome());
+        assertFalse(r.fired(), "UNSELECTED never fires");
+        assertTrue(state.isUnbaselined(), "UNSELECTED mutates no state");
+    }
+
+    @Test
+    void levelModeYieldsUnknownNoMutationNoFire() {
+        PriceRule level = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
+                new BigDecimal("50.00"), 2, new BigDecimal("0.10")).withMode(RuleMode.LEVEL);
+        RuleState state = new RuleState();
+        var r = evaluator.evaluate(level, state, wege(new BigDecimal("100.00")));
+        assertEquals(RuleOutcome.UNKNOWN, r.outcome(), "LEVEL blocked pending Q-19");
+        assertFalse(r.fired());
+        assertTrue(state.isUnbaselined(), "LEVEL mutates no state");
     }
 
     // ---- Regression P0-C: wrong-asset quote must never fire ----
@@ -127,7 +152,8 @@ class RuleEvaluatorTest {
 
     @Test
     void belowRuleFiresOnDownwardCrossing() {
-        PriceRule rule = new PriceRule("r2", "WEGE3", Comparator.BELOW, new BigDecimal("50.00"), 2, BigDecimal.ZERO);
+        PriceRule rule = new PriceRule("r2", "WEGE3", Comparator.BELOW, new BigDecimal("50.00"), 2, BigDecimal.ZERO)
+                .withMode(RuleMode.CROSSING);
         RuleState state = new RuleState();
         evaluator.evaluate(rule, state, wege(new BigDecimal("50.50"))); // baseline false (above) → ARMED
         var cross = evaluator.evaluate(rule, state, wege(new BigDecimal("49.99")));

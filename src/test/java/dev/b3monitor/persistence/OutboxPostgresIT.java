@@ -26,7 +26,7 @@ import java.time.ZoneOffset;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration tests against a REAL PostgreSQL via Testcontainers, exercising Flyway V1–V8, the unique
+ * Integration tests against a REAL PostgreSQL via Testcontainers, exercising Flyway V1–V12, the unique
  * logical-key constraint, the post-commit dispatcher (claim/lease/fencing/claim-generation), a
  * TWO-CONSUMER dispatch race, durable rule-state recovery, expired-lease quarantine (NO resend),
  * stale-result fencing after reconciliation, revision supersession / old-PENDING cancellation, and the
@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>Cycle-4 review P1-1 fix: the context uses a FIXED test {@link Clock} (NOW) and the quotes are
  * built relative to that clock, so the 45-minute freshness guard does not fail the test when run on a
- * later date. {@code ddl-auto=validate} makes context start itself prove V1–V8 match the entities.
+ * later date. {@code ddl-auto=validate} makes context start itself prove V1–V12 match the entities.
  */
 @Testcontainers
 @SpringBootTest
@@ -53,7 +53,7 @@ class OutboxPostgresIT {
         r.add("spring.datasource.username", postgres::getUsername);
         r.add("spring.datasource.password", postgres::getPassword);
         r.add("spring.flyway.enabled", () -> "true");
-        r.add("spring.jpa.hibernate.ddl-auto", () -> "validate"); // proves V1–V8 match the entities
+        r.add("spring.jpa.hibernate.ddl-auto", () -> "validate"); // proves V1–V12 match the entities
         r.add("b3monitor.workers.enabled", () -> "false");
     }
 
@@ -69,6 +69,7 @@ class OutboxPostgresIT {
     }
 
     @Autowired OutboxRepository outbox;
+    @Autowired OutboxAttemptRepository attempts;
     @Autowired OutboxDispatcher dispatcher;
     @Autowired OutboxReconciliationService reconcile;
     @Autowired RuleStateRepository ruleStates;
@@ -108,7 +109,10 @@ class OutboxPostgresIT {
         sending.claim("dead", NOW.minusSeconds(5));
         sending.markSending(NOW.minusSeconds(5));
         sending.setState(OutboxState.SENDING);
-        outbox.save(sending);
+        Long sendingId = outbox.save(sending).getId();
+        // Seed the OPEN attempt that prepareSend would have written (cycle-9 item D).
+        attempts.save(new OutboxAttemptEntity(sendingId, "it-sending",
+                sending.getClaimGeneration(), sending.getFencingToken(), NOW.minusSeconds(5)));
         OutboxEntity inflight = newRow("it-inflight");
         inflight.claim("dead2", NOW.minusSeconds(5));
         inflight.setState(OutboxState.IN_FLIGHT);
@@ -119,6 +123,12 @@ class OutboxPostgresIT {
         assertEquals(1, rec[1], "SENDING → quarantined");
         assertEquals(OutboxState.UNKNOWN_OUTCOME, outbox.findByLogicalKey("it-sending").orElseThrow().getState());
         assertEquals(OutboxState.PENDING, outbox.findByLogicalKey("it-inflight").orElseThrow().getState());
+        // the SENDING attempt is closed UNKNOWN (not left dangling); IN_FLIGHT never had one.
+        var sendingAttempt = attempts.findByOutboxIdAndClaimGeneration(sendingId,
+                outbox.findByLogicalKey("it-sending").orElseThrow().getClaimGeneration()).orElseThrow();
+        assertFalse(sendingAttempt.isOpen());
+        assertEquals(dev.b3monitor.domain.outbox.SubmissionResult.Kind.UNKNOWN, sendingAttempt.getOutcome());
+        assertEquals("lease-expired", sendingAttempt.getSanitizedStatus());
     }
 
     @Test
@@ -137,7 +147,7 @@ class OutboxPostgresIT {
     @Test
     void pipelinePersistsObservationAndRuleStateOnRealPostgres() {
         PriceRule rule = new PriceRule("it-r", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("50.00"), 2, new BigDecimal("0.10"));
+                new BigDecimal("50.00"), 2, new BigDecimal("0.10")).withMode(dev.b3monitor.domain.rule.RuleMode.CROSSING);
         processing.process(rule, quote(new BigDecimal("49.00"), NOW.minusSeconds(60)));        // baseline
         var fire = processing.process(rule, quote(new BigDecimal("50.50"), NOW.minusSeconds(30)));
         assertTrue(fire.fired());

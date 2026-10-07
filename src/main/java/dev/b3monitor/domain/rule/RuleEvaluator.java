@@ -4,6 +4,7 @@ import dev.b3monitor.domain.quote.Quote;
 import dev.b3monitor.domain.quote.QuoteRejectionReason;
 import dev.b3monitor.domain.quote.QuoteValidation;
 import dev.b3monitor.domain.quote.QuoteValidator;
+// RuleMode is in this same package (dev.b3monitor.domain.rule) — no import needed.
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -35,6 +36,15 @@ public class RuleEvaluator {
     }
 
     public EvaluationResult evaluate(PriceRule rule, RuleState state, Quote quote) {
+        // 0) Mode gate (cycle-8 review C): the domain itself fails closed on any non-operable mode.
+        //    UNSELECTED (no mode chosen) and LEVEL (Q-19 unapproved) yield UNKNOWN with NO state
+        //    mutation and NO fire — only an explicitly-selected CROSSING rule is evaluated. This closes
+        //    the implicit-CROSSING bypass that the scheduler/registry filtered but the domain did not.
+        if (rule.mode() != RuleMode.CROSSING) {
+            QuoteValidation vMode = validator.validate(quote);
+            return new EvaluationResult(RuleOutcome.UNKNOWN, false, false, vMode, new ArrayList<>(vMode.reasons()));
+        }
+
         // 1) Quote-level eligibility (identity/currency/price/freshness/stale).
         QuoteValidation v = validator.validate(quote);
 

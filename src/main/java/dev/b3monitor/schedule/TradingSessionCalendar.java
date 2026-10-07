@@ -4,11 +4,11 @@ import java.time.Instant;
 import java.time.ZoneId;
 
 /**
- * Versioned B3 trading-session calendar (cycle-7 item G — CAL-01 groundwork). Unlike the simple
- * {@link TradingCalendar} (OPEN/CLOSED/UNKNOWN), this models the full session taxonomy and carries a
- * dataset VERSION so a calendar derived from an audited holiday/session table is distinguishable from
- * the fail-closed default. Market-date boundaries are derived through {@link #zone()}
- * (America/Sao_Paulo), not the server's local zone.
+ * Versioned B3 trading-session calendar (cycle-7 item G — CAL-01, consolidated cycle-9). This is the
+ * SINGLE calendar port the scheduler depends on. It models the full session taxonomy
+ * (OPEN/CLOSED/HOLIDAY/SPECIAL/UNKNOWN) and carries a dataset VERSION so a calendar derived from an
+ * audited holiday/session table is distinguishable from the fail-closed default. Market-date
+ * boundaries are derived through {@link #zone()} (America/Sao_Paulo by default), not the server's zone.
  *
  * <p>Fail-closed: with no validated dataset, every query is {@link SessionStatus#UNKNOWN} and the
  * {@link #datasetVersion()} is {@code "none"}. Holidays are NEVER invented — see

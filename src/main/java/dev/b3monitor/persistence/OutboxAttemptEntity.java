@@ -6,12 +6,15 @@ import jakarta.persistence.*;
 import java.time.Instant;
 
 /**
- * Append-only ledger of EXTERNAL submission attempts (cycle-8 review P1-high / item C). One row is
- * created when {@code prepareSend} commits {@code SENDING} — i.e. when an external side effect becomes
- * possible — NOT on claim. A pre-send claim crash therefore creates no attempt. {@code record} closes
- * exactly the open attempt with a typed outcome + provider provenance. A proof-gated requeue leads to a
- * NEW attempt row on the next send; prior rows are immutable, so the full attempt history is
- * reconstructable. No payload/secret is stored.
+ * Durable per-attempt ledger of EXTERNAL submission attempts (cycle-8 review E — NOT strictly
+ * "append-only": a row has ONE immutable identity {@code (outbox_id, claim_generation)} and makes
+ * exactly one legal {@code OPEN → CLOSED} transition, after which it is immutable). One row is created
+ * when {@code prepareSend} commits {@code SENDING} — i.e. when an external side effect becomes possible
+ * — NOT on claim. A pre-send claim crash therefore creates no attempt. {@code record} (or expired-lease
+ * reconciliation) closes exactly the open attempt with a typed outcome + provider provenance. A
+ * proof-gated requeue leads to a NEW attempt row on the next send (new claim generation); prior rows
+ * are immutable, so the full attempt history is reconstructable. Attempt rows are never deleted at
+ * runtime. No payload/secret is stored.
  */
 @Entity
 @Table(name = "outbox_attempt",
@@ -67,14 +70,30 @@ public class OutboxAttemptEntity {
         this.startedAt = startedAt;
     }
 
-    /** Close the attempt with its result (immutable thereafter). */
+    /**
+     * Close the attempt with its typed result. This is the ONE legal {@code OPEN → CLOSED} transition
+     * (cycle-8 review E): the row's identity {@code (outbox_id, claim_generation)} is immutable, and
+     * after this single close the outcome fields are frozen. A second close or a null result is a
+     * programming/invariant error and is rejected loudly rather than silently overwriting history.
+     */
     public void close(Instant finishedAt, SubmissionResult result) {
+        if (result == null) {
+            throw new IllegalArgumentException("attempt close requires a non-null result");
+        }
+        if (this.finishedAt != null || this.outcome != null) {
+            throw new IllegalStateException(
+                    "attempt " + id + " (outbox " + outboxId + " gen " + claimGeneration + ") already closed as "
+                            + this.outcome + "; a second close is forbidden");
+        }
         this.finishedAt = finishedAt;
         this.outcome = result.kind();
         this.providerMessageId = result.providerMessageId();
         this.providerAcceptedAt = result.providerAcceptedAt();
         this.sanitizedStatus = result.sanitizedStatus();
     }
+
+    /** True while this attempt is still open (no result recorded yet). */
+    public boolean isOpen() { return this.finishedAt == null && this.outcome == null; }
 
     public Long getId() { return id; }
     public Long getOutboxId() { return outboxId; }

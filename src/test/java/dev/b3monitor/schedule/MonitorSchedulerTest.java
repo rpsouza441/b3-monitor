@@ -4,12 +4,16 @@ import dev.b3monitor.domain.auth.OperationalAuthorization;
 import dev.b3monitor.domain.auth.StaticOperationalAuthorization;
 import dev.b3monitor.domain.rule.Comparator;
 import dev.b3monitor.domain.rule.PriceRule;
+import dev.b3monitor.domain.rule.RuleMode;
 import dev.b3monitor.monitor.MonitorPipeline;
 import dev.b3monitor.persistence.OutboxDispatcher;
 import dev.b3monitor.quota.BrapiQuotaManager;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -17,27 +21,34 @@ import static org.mockito.Mockito.*;
 
 /**
  * Scheduler tests: disabled by default (no-op, never polls); the per-asset authorization gate blocks
- * fetch FIRST even with the worker enabled, calendar OPEN and a dedicated quota (cycle-5 review P1);
- * UNKNOWN calendar fails closed; on a granted path the fenced quota slot is always released and
- * reset headers are OBSERVED (never reset the budget here); expired leases + stranded reservations
- * are reconciled each tick.
+ * fetch FIRST even with the worker enabled, the market in session and a dedicated quota (cycle-5
+ * review P1); an UNKNOWN session calendar fails closed (cycle-9 item G); on a granted path the fenced
+ * quota slot is always released and reset headers are OBSERVED (never reset the budget here); expired
+ * leases + stranded reservations are reconciled each tick.
  */
 class MonitorSchedulerTest {
 
+    private static final Instant NOW = Instant.parse("2026-10-06T17:00:00Z");
+    private final Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
     private final MonitorPipeline pipeline = mock(MonitorPipeline.class);
     private final OutboxDispatcher dispatcher = mock(OutboxDispatcher.class);
     private final BrapiQuotaManager quota = mock(BrapiQuotaManager.class);
-    private final TradingCalendar calendar = mock(TradingCalendar.class);
+    private final TradingSessionCalendar calendar = mock(TradingSessionCalendar.class);
     /** REAL authorization (not a mock): all assets NOT_AUTHORIZED by default, SNAG11 partial, KNHY11 quarantine. */
     private final OperationalAuthorization authorization = new StaticOperationalAuthorization();
 
+    private MonitorScheduler scheduler(OperationalAuthorization auth, boolean enabled) {
+        return new MonitorScheduler(pipeline, dispatcher, quota, calendar, auth, src(), clock, enabled);
+    }
+
     private PriceRule rule(String ticker) {
-        return new PriceRule("r-" + ticker, ticker, Comparator.ABOVE, new BigDecimal("50.00"), 2, BigDecimal.ZERO);
+        return new PriceRule("r-" + ticker, ticker, Comparator.ABOVE, new BigDecimal("50.00"), 2, BigDecimal.ZERO)
+                .withMode(RuleMode.CROSSING);
     }
 
     @Test
     void disabledSchedulerIsNoOpAndNeverTouchesPipelineOrQuota() {
-        var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, authorization, src(), false);
+        var sched = scheduler(authorization, false);
         var report = sched.tick(List.of(rule("WEGE3")));
         assertFalse(sched.isEnabled());
         assertEquals(0, report.fetched());
@@ -46,13 +57,13 @@ class MonitorSchedulerTest {
 
     @Test
     void unauthorizedAssetNeverFetchesEvenWithOpenMarketAndDedicatedQuota() {
-        // worker ENABLED, calendar OPEN, quota would grant — authorization must still block the fetch.
-        lenient().when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
+        // worker ENABLED, market in session, quota would grant — authorization must still block the fetch.
+        lenient().when(calendar.statusAt(any())).thenReturn(TradingSessionCalendar.SessionStatus.OPEN);
         lenient().when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Granted(1L));
         when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
 
-        var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, authorization, src(), true);
+        var sched = scheduler(authorization, true);
         // WEGE3 is NOT_AUTHORIZED by default; SNAG11 PARTIAL; KNHY11 QUARANTINED — none may fetch.
         var report = sched.tick(List.of(rule("WEGE3"), rule("SNAG11"), rule("KNHY11")));
 
@@ -60,16 +71,17 @@ class MonitorSchedulerTest {
         assertEquals(0, report.fetched());
         verifyNoInteractions(pipeline);
         verify(quota, never()).tryAcquire();                 // authorization is checked BEFORE quota
-        verify(calendar, never()).isTradingNow();            // and before the calendar
+        verify(calendar, never()).statusAt(any());           // and before the calendar
     }
 
     @Test
     void unknownCalendarSkipsWithoutAcquiringQuotaOrFetching() {
         var auth = authorizingOnly("WEGE3");
-        when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.UNKNOWN);
+        when(calendar.statusAt(any())).thenReturn(TradingSessionCalendar.SessionStatus.UNKNOWN);
+        lenient().when(calendar.datasetVersion()).thenReturn("none");
         when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
-        var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, auth, src(), true);
+        var sched = scheduler(auth, true);
         var report = sched.tick(List.of(rule("WEGE3")));
         assertEquals(1, report.skippedCalendar());
         assertEquals(0, report.fetched());
@@ -80,13 +92,43 @@ class MonitorSchedulerTest {
     }
 
     @Test
+    void holidaySessionSkipsFailClosed() {
+        var auth = authorizingOnly("WEGE3");
+        when(calendar.statusAt(any())).thenReturn(TradingSessionCalendar.SessionStatus.HOLIDAY);
+        lenient().when(calendar.datasetVersion()).thenReturn("test-v1");
+        when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
+        when(dispatcher.drainBatch()).thenReturn(0);
+        var sched = scheduler(auth, true);
+        var report = sched.tick(List.of(rule("WEGE3")));
+        assertEquals(1, report.skippedCalendar(), "HOLIDAY is not a collectable session");
+        assertEquals(0, report.fetched());
+        verify(quota, never()).tryAcquire();
+    }
+
+    @Test
+    void specialSessionIsCollectable() {
+        var auth = authorizingOnly("WEGE3");
+        when(calendar.statusAt(any())).thenReturn(TradingSessionCalendar.SessionStatus.SPECIAL);
+        when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Granted(9L));
+        when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
+        when(dispatcher.drainBatch()).thenReturn(0);
+        when(pipeline.runOnce(any()))
+                .thenReturn(new MonitorPipeline.CycleResult(true, true, false, "ABOVE", null, null));
+        var sched = scheduler(auth, true);
+        var report = sched.tick(List.of(rule("WEGE3")));
+        assertEquals(0, report.skippedCalendar(), "SPECIAL is a collectable session");
+        assertEquals(1, report.fetched());
+        verify(quota).release(9L);
+    }
+
+    @Test
     void openCalendarButQuotaDeniedSkipsFetch() {
         var auth = authorizingOnly("WEGE3");
-        when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
+        when(calendar.statusAt(any())).thenReturn(TradingSessionCalendar.SessionStatus.OPEN);
         when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Denied("CONCURRENCY_BUSY"));
         when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
-        var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, auth, src(), true);
+        var sched = scheduler(auth, true);
         var report = sched.tick(List.of(rule("WEGE3")));
         assertEquals(1, report.deniedQuota());
         assertEquals(0, report.fetched());
@@ -97,14 +139,14 @@ class MonitorSchedulerTest {
     @Test
     void grantedPathAlwaysReleasesFencedSlotAndObserves429() {
         var auth = authorizingOnly("WEGE3");
-        when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
+        when(calendar.statusAt(any())).thenReturn(TradingSessionCalendar.SessionStatus.OPEN);
         when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Granted(77L));
         when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
         var rl = dev.b3monitor.adapter.brapi.BrapiException.rateLimited("429", 42L, 3600L, 10);
         when(pipeline.runOnce(any()))
                 .thenReturn(new MonitorPipeline.CycleResult(false, false, false, "RATE_LIMITED", rl, null));
-        var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, auth, src(), true);
+        var sched = scheduler(auth, true);
         sched.tick(List.of(rule("WEGE3")));
         verify(quota).onRateLimited(42L);
         verify(quota).observeResetHeader(3600L, 10, null, null, null);  // 429 path: no window/limit → fail closed
@@ -117,14 +159,14 @@ class MonitorSchedulerTest {
     @Test
     void successPathObservesResetHeadersToo() {
         var auth = authorizingOnly("WEGE3");
-        when(calendar.isTradingNow()).thenReturn(TradingCalendar.Status.OPEN);
+        when(calendar.statusAt(any())).thenReturn(TradingSessionCalendar.SessionStatus.OPEN);
         when(quota.tryAcquire()).thenReturn(new BrapiQuotaManager.Granted(5L));
         when(dispatcher.reconcileExpiredLeases()).thenReturn(new int[]{0,0});
         when(dispatcher.drainBatch()).thenReturn(0);
         var sig = new dev.b3monitor.adapter.brapi.QuotaSignal(null, 7200L, 8000, 15000, "billing-cycle", null, null, false);
         when(pipeline.runOnce(any()))
                 .thenReturn(new MonitorPipeline.CycleResult(true, true, false, "ABOVE", null, sig));
-        var sched = new MonitorScheduler(pipeline, dispatcher, quota, calendar, auth, src(), true);
+        var sched = scheduler(auth, true);
         sched.tick(List.of(rule("WEGE3")));
         verify(quota).observeResetHeader(7200L, 8000, 15000, "billing-cycle", null);  // full 2xx provenance
         verify(quota).release(5L);
@@ -138,5 +180,5 @@ class MonitorSchedulerTest {
     }
 
     /** Empty rule source — these tests drive tick(List) directly, so the no-arg source is unused. */
-    private static dev.b3monitor.domain.rule.RuleSource src() { return () -> java.util.List.of(); }
+    private static dev.b3monitor.domain.rule.RuleSource src() { return java.util.List::of; }
 }

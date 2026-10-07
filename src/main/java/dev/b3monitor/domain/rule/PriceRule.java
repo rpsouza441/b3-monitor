@@ -39,15 +39,24 @@ public record PriceRule(
         if (revision < 1) throw new IllegalArgumentException("revision must be >= 1");
     }
 
-    /** Convenience constructor defaulting revision to 1 and mode to CROSSING (test/legacy call sites). */
+    /**
+     * Convenience constructor defaulting revision to 1 and mode to {@link RuleMode#UNSELECTED}
+     * (cycle-8 review C: there is NO implicit CROSSING — an operational rule must select its mode
+     * explicitly via {@code withMode}/the registry, and the evaluator fails closed on UNSELECTED).
+     */
     public PriceRule(String id, String ticker, Comparator comparator,
                      BigDecimal threshold, int precision, BigDecimal hysteresis) {
-        this(id, ticker, comparator, threshold, precision, hysteresis, 1, RuleMode.CROSSING);
+        this(id, ticker, comparator, threshold, precision, hysteresis, 1, RuleMode.UNSELECTED);
     }
 
-    /** Convenience constructor with an explicit revision, defaulting mode to CROSSING. */
+    /** Convenience constructor with an explicit revision, defaulting mode to UNSELECTED (fail-closed). */
     public PriceRule(String id, String ticker, Comparator comparator,
                      BigDecimal threshold, int precision, BigDecimal hysteresis, long revision) {
-        this(id, ticker, comparator, threshold, precision, hysteresis, revision, RuleMode.CROSSING);
+        this(id, ticker, comparator, threshold, precision, hysteresis, revision, RuleMode.UNSELECTED);
+    }
+
+    /** Return a copy of this rule with an explicit {@link RuleMode} — the only way to make it operable. */
+    public PriceRule withMode(RuleMode newMode) {
+        return new PriceRule(id, ticker, comparator, threshold, precision, hysteresis, revision, newMode);
     }
 }

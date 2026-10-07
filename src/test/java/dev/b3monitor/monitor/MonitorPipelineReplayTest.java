@@ -6,6 +6,7 @@ import dev.b3monitor.domain.quote.QuoteValidator;
 import dev.b3monitor.domain.rule.Comparator;
 import dev.b3monitor.domain.rule.PriceRule;
 import dev.b3monitor.domain.rule.RuleEvaluator;
+import dev.b3monitor.domain.rule.RuleMode;
 import dev.b3monitor.domain.rule.RuleState;
 import dev.b3monitor.domain.outbox.SimulatedWahaAdapter;
 import dev.b3monitor.persistence.*;
@@ -59,7 +60,8 @@ class MonitorPipelineReplayTest {
     @Autowired RuleStateRepository ruleStates;
 
     private final PriceRule rule =
-            new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"));
+            new PriceRule("r1", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"))
+                    .withMode(RuleMode.CROSSING);
 
     private Quote at(BigDecimal price, Instant src) {
         return new Quote("WEGE3", "WEGE3", false, "BRL", price, null, null, src, NOW, false);
@@ -121,7 +123,7 @@ class MonitorPipelineReplayTest {
 
         // New revision with a different threshold: re-baseline, must NOT auto-fire even though above old.
         PriceRule rev2 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 2);
+                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 2).withMode(RuleMode.CROSSING);
         var afterBump = pipeline.process(rev2, at(new BigDecimal("54.00"), NOW.minusSeconds(60)));
         assertFalse(afterBump.fired(), "revision bump re-baselines, never auto-fires");
         assertEquals(1, outbox.count());
@@ -133,13 +135,13 @@ class MonitorPipelineReplayTest {
     void lowerIncomingRevisionIsRejectedStaleNoEvaluation() {
         // establish revision 3 state
         PriceRule rev3 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 3);
+                new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 3).withMode(RuleMode.CROSSING);
         pipeline.process(rev3, at(new BigDecimal("49.00"), NOW.minusSeconds(120))); // ARMED @ rev3
         var armedPhase = ruleStates.findByRuleId("r1").orElseThrow().getPhase();
 
         // a STALE lower revision arrives (rev1) that WOULD cross — must be rejected, no fire, no mutation
         PriceRule rev1 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("40.00"), 2, new BigDecimal("0.10"), 1);
+                new BigDecimal("40.00"), 2, new BigDecimal("0.10"), 1).withMode(RuleMode.CROSSING);
         var stale = pipeline.process(rev1, at(new BigDecimal("50.50"), NOW.minusSeconds(60)));
         assertFalse(stale.fired());
         assertEquals("STALE_RULE_REVISION", stale.detail());
@@ -159,7 +161,7 @@ class MonitorPipelineReplayTest {
 
         // bump to rev2 → the unsent rev1 PENDING must be CANCELLED (superseded), not erased
         PriceRule rev2 = new PriceRule("r1", "WEGE3", Comparator.ABOVE,
-                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 2);
+                new BigDecimal("55.00"), 2, new BigDecimal("0.10"), 2).withMode(RuleMode.CROSSING);
         pipeline.process(rev2, at(new BigDecimal("54.00"), NOW.minusSeconds(120)));
         var afterBump = outbox.findByLogicalKey(rev1Row.getLogicalKey()).orElseThrow();
         assertEquals(dev.b3monitor.domain.outbox.OutboxState.CANCELLED, afterBump.getState(),

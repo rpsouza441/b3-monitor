@@ -10,7 +10,6 @@ import dev.b3monitor.domain.rule.PriceRule;
 import dev.b3monitor.persistence.*;
 import dev.b3monitor.quota.BrapiQuotaManager;
 import dev.b3monitor.schedule.MonitorScheduler;
-import dev.b3monitor.schedule.TradingCalendar;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -59,8 +58,11 @@ class SchedulerTransactionTest {
     static class Cfg {
         @Bean @Primary Clock fixedClock() { return Clock.fixed(NOW, ZoneOffset.UTC); }
         @Bean @Primary CountingAdapter countingAdapter() { return new CountingAdapter(); }
-        @Bean @Primary TradingCalendar openCalendar() {
-            return new TradingCalendar() { @Override public Status isTradingNow() { return Status.OPEN; } };
+        @Bean @Primary dev.b3monitor.schedule.TradingSessionCalendar openCalendar() {
+            return new dev.b3monitor.schedule.TradingSessionCalendar() {
+                @Override public String datasetVersion() { return "test-open"; }
+                @Override public SessionStatus statusAt(java.time.Instant at) { return SessionStatus.OPEN; }
+            };
         }
         /** Authorize exactly WEGE3 so the worker path can fetch in these tests (the default static
          *  authorization leaves every asset NOT_AUTHORIZED). */
@@ -72,10 +74,10 @@ class SchedulerTransactionTest {
                           dev.b3monitor.domain.auth.OperationalAuthorization.Status.NOT_AUTHORIZED, "test");
         }
         @Bean @Primary MonitorScheduler enabledScheduler(MonitorPipeline p, OutboxDispatcher d,
-                                BrapiQuotaManager q, TradingCalendar c,
+                                BrapiQuotaManager q, dev.b3monitor.schedule.TradingSessionCalendar c,
                                 dev.b3monitor.domain.auth.OperationalAuthorization a,
-                                dev.b3monitor.domain.rule.RuleSource rs) {
-            return new MonitorScheduler(p, d, q, c, a, rs, true);
+                                dev.b3monitor.domain.rule.RuleSource rs, Clock clock) {
+            return new MonitorScheduler(p, d, q, c, a, rs, clock, true);
         }
         /** Allow-all dispatch guard so these transaction-boundary tests exercise the SEND path; the
          *  fail-closed production default (unknown rule) is covered by OutboxDispatcherTest + the
@@ -103,7 +105,8 @@ class SchedulerTransactionTest {
     @Autowired dev.b3monitor.persistence.RuleDefinitionRepository ruleDefs;
 
     private PriceRule rule() {
-        return new PriceRule("rT", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 2);
+        return new PriceRule("rT", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, new BigDecimal("0.10"), 2)
+                .withMode(dev.b3monitor.domain.rule.RuleMode.CROSSING);
     }
     private Quote wege(BigDecimal price, Instant src) {
         return new Quote("WEGE3", "WEGE3", false, "BRL", price, null, null, src, NOW, false);

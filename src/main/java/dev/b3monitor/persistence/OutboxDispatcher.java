@@ -59,7 +59,14 @@ public class OutboxDispatcher {
         try {
             prepared = tx.prepareSend(claim.rowId(), claim.fencingToken(), clock.instant());
         } catch (ObjectOptimisticLockingFailureException race) {
-            return Optional.of(OutboxState.UNKNOWN_OUTCOME);  // concurrent terminalization; nothing sent
+            // Pre-send optimistic race (cycle-8 review F): a concurrent writer won before SENDING
+            // committed, so NOTHING was sent and NO UNKNOWN transition was persisted. Reporting
+            // UNKNOWN_OUTCOME here would contradict the persisted state. Reload the row and report its
+            // ACTUAL persisted state; if it vanished, report empty. No adapter call occurred.
+            OutboxEntity actual = tx.loadRow(claim.rowId());
+            log.debug("prepareSend race for {}: no send; persisted state now {}",
+                    claim.logicalKey(), actual == null ? "GONE" : actual.getState());
+            return actual == null ? Optional.empty() : Optional.of(actual.getState());
         }
         if (prepared.outcome() != OutboxTxOps.PrepareOutcome.AUTHORIZED) {
             log.warn("dispatch not authorized for {}: {} → {}",

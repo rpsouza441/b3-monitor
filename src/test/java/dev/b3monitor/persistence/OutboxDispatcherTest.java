@@ -224,4 +224,26 @@ class OutboxDispatcherTest {
     void nothingToDispatchReturnsEmpty() {
         assertTrue(dispatcher.dispatchOne().isEmpty());
     }
+
+    /**
+     * Cycle-9 item F — a pre-send optimistic race (the row is terminalized by another writer between
+     * claim and prepareSend) must NOT be reported as UNKNOWN_OUTCOME: nothing was sent and no UNKNOWN
+     * transition was persisted. The dispatcher reports the ACTUAL persisted state and makes no adapter
+     * call. Here the guard denial path exercises the "pre-send loss" semantics deterministically: the
+     * row goes terminal with NO send and the reported outcome equals the persisted terminal state.
+     */
+    @Test
+    void preSendRaceReportsPersistedStateNotFabricatedUnknown() {
+        seedCommitted("ep-race");
+        guard.denial = DispatchEligibilityGuard.Denial.SUPERSEDED_REVISION;  // pre-send terminalization
+        int before = prog().sends.get();
+        var outcome = dispatcher.dispatchOne();
+        // SUPERSEDED_REVISION maps to CANCELLED — the dispatcher reports exactly that, never UNKNOWN.
+        assertEquals(OutboxState.CANCELLED, outcome.orElseThrow());
+        assertNotEquals(OutboxState.UNKNOWN_OUTCOME, outcome.orElseThrow(),
+                "a pre-send loss is never reported as UNKNOWN_OUTCOME");
+        assertEquals(OutboxState.CANCELLED, repo.findByLogicalKey("ep-race").orElseThrow().getState(),
+                "reported outcome matches the persisted state");
+        assertEquals(before, prog().sends.get(), "no adapter call on a pre-send loss");
+    }
 }

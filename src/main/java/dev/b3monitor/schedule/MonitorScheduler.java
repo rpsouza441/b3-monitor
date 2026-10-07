@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.time.Clock;
 import java.util.List;
 
 /**
@@ -26,7 +27,9 @@ import java.util.List;
  *       so a {@code NOT_AUTHORIZED}/{@code PARTIAL}/{@code QUARANTINED}/{@code PAUSED} asset can never
  *       fetch even if the worker was accidentally enabled with a dedicated quota and an OPEN market
  *       (cycle-5 review P1).</li>
- *   <li><b>Trading calendar</b> ({@link TradingCalendar}) — UNKNOWN or CLOSED ⇒ skip (fail-closed).</li>
+ *   <li><b>Trading session calendar</b> ({@link TradingSessionCalendar}) — collects only in an OPEN or
+ *       SPECIAL session; CLOSED / HOLIDAY / UNKNOWN ⇒ skip (fail-closed). Session windows and the
+ *       dataset version come from a validated dataset; the production default is UNKNOWN "none".</li>
  *   <li><b>Quota admission</b> ({@link BrapiQuotaManager}) — durable single in-flight, conservative
  *       ceiling, shared-quota-UNKNOWN block, reconciliation flag.</li>
  * </ol>
@@ -43,15 +46,17 @@ public class MonitorScheduler {
     private final MonitorPipeline pipeline;
     private final OutboxDispatcher dispatcher;
     private final BrapiQuotaManager quota;
-    private final TradingCalendar calendar;
+    private final TradingSessionCalendar calendar;
     private final OperationalAuthorization authorization;
     private final dev.b3monitor.domain.rule.RuleSource ruleSource;
+    private final Clock clock;
     private final boolean enabled;
 
     public MonitorScheduler(MonitorPipeline pipeline, OutboxDispatcher dispatcher,
-                            BrapiQuotaManager quota, TradingCalendar calendar,
+                            BrapiQuotaManager quota, TradingSessionCalendar calendar,
                             OperationalAuthorization authorization,
                             dev.b3monitor.domain.rule.RuleSource ruleSource,
+                            Clock clock,
                             @Value("${b3monitor.workers.enabled:false}") boolean enabled) {
         this.pipeline = pipeline;
         this.dispatcher = dispatcher;
@@ -59,6 +64,7 @@ public class MonitorScheduler {
         this.calendar = calendar;
         this.authorization = authorization;
         this.ruleSource = ruleSource;
+        this.clock = clock;
         this.enabled = enabled;
     }
 
@@ -103,9 +109,16 @@ public class MonitorScheduler {
                 log.debug("authorization denied for {}: {} ({})", rule.ticker(), auth.status(), auth.reason());
                 continue;
             }
-            // GATE 2 — trading calendar (UNKNOWN or CLOSED ⇒ fail-closed skip).
-            if (calendar.isTradingNow() != TradingCalendar.Status.OPEN) {
+            // GATE 2 — trading session calendar (cycle-9 item G): collect only when the market is in a
+            // session (OPEN or SPECIAL). CLOSED / HOLIDAY / UNKNOWN ⇒ fail-closed skip. The window and
+            // dataset version come entirely from the validated dataset (UNKNOWN "none" by default).
+            TradingSessionCalendar.SessionStatus session = calendar.statusAt(clock.instant());
+            boolean inSession = session == TradingSessionCalendar.SessionStatus.OPEN
+                    || session == TradingSessionCalendar.SessionStatus.SPECIAL;
+            if (!inSession) {
                 skipped++;
+                log.debug("calendar skip for {}: session={} dataset={}", rule.ticker(), session,
+                        calendar.datasetVersion());
                 continue;
             }
             // GATE 3 — quota admission (durable single in-flight, fenced).

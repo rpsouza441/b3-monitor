@@ -51,10 +51,13 @@ public class RuleStateEntity {
     private Instant lastFiredAt;
 
     /**
-     * Comparison-continuity marker (cycle-7 review P0-live). Set true on an ordinary resume: the first
-     * eligible observation after a pause must NOT fire — it only re-establishes the baseline — because
-     * the FALSE→TRUE transition during the unobserved pause gap was never seen. Cleared once that fresh
-     * baseline is consumed.
+     * Comparison-continuity marker (cycle-7 P0-live; cycle-8 review B). Set true on an ordinary resume.
+     * It records ONLY that comparison continuity was lost across the unobserved pause gap — it does NOT
+     * touch {@link #phase}, so the persisted episode/latch state (CONTRACTS: "ordinary resume preserves
+     * consumed/latch/episode/cooldown state") survives the pause. The first eligible observation after
+     * resume evaluates against the preserved phase but is FORCED not to fire (the FALSE→TRUE crossing
+     * that may have happened during the gap was never observed, and a latched episode is never replayed);
+     * the resulting phase is persisted, the marker cleared, and source-time advanced, atomically.
      */
     @Column(name = "rebaseline_required", nullable = false)
     private boolean rebaselineRequired = false;
@@ -81,10 +84,13 @@ public class RuleStateEntity {
         return lastProcessedSourceTime == null || sourceTime.isAfter(lastProcessedSourceTime);
     }
 
-    /** Request a fresh baseline (ordinary resume): the next eligible observation re-baselines, no fire. */
+    /**
+     * Request a fresh comparison baseline (ordinary resume). Sets ONLY the marker — the persisted
+     * {@link #phase} (and thus any LATCHED episode / ARMED continuity) is PRESERVED (cycle-8 review B).
+     * The first eligible observation after resume evaluates against this preserved phase but cannot fire.
+     */
     public void markRebaselineRequired() {
         this.rebaselineRequired = true;
-        this.phase = RuleState.Phase.UNBASELINED;
     }
     public boolean isRebaselineRequired() { return rebaselineRequired; }
     public void clearRebaselineRequired() { this.rebaselineRequired = false; }
