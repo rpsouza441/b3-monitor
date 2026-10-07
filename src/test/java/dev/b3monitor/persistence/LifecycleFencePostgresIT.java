@@ -147,4 +147,116 @@ class LifecycleFencePostgresIT {
         assertEquals("RULE_PAUSED_CURRENT", r.detail());
         assertEquals(0, outbox.findByRuleIdAndState("pg-proc", OutboxState.PENDING).size());
     }
+
+    // ===== cycle-13 P1-B: TRUE concurrent races (CyclicBarrier + 2 threads + independent tx) =====
+
+    @Autowired RuleDefinitionRepository ruleDefs;
+    @Autowired org.springframework.transaction.PlatformTransactionManager txm;
+
+    /** Race 1 — pause vs process from the same pre-race state. Both threads start together; whichever
+     *  acquires the PESSIMISTIC_WRITE fence first wins, and the invariant must hold regardless of order:
+     *  a committed pause leaves NO valid unsent PENDING behind. */
+    @Test
+    void race_pauseVsProcess_noStalePendingSurvivesPause() throws Exception {
+        long rev = seedCrossing("pg-r1");
+        processing.process(snap("pg-r1", rev), q(new BigDecimal("49.00"), NOW.minusSeconds(180))); // ARMED
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var barrier = new java.util.concurrent.CyclicBarrier(2);
+        var fProcess = pool.submit(() -> { barrier.await();
+            try { processing.process(snap("pg-r1", rev), q(new BigDecimal("50.50"), NOW.minusSeconds(60))); }
+            catch (Exception ignored) {} return null; });
+        var fPause = pool.submit(() -> { barrier.await(); admin.pause("pg-r1"); return null; });
+        fProcess.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        fPause.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        pool.shutdownNow();
+        assertEquals(0, outbox.findByRuleIdAndState("pg-r1", OutboxState.PENDING).size(),
+                "a committed pause leaves no valid unsent PENDING, regardless of race order");
+    }
+
+    /** Race 2 — pause vs prepareSend over a real claimed row, started together. The outcome must be one
+     *  of the two legal orders: either prepareSend is DENIED (pause won) with zero adapter calls, or it
+     *  is AUTHORIZED (SENDING committed) and pause did not rewrite it as unsent. Never both. */
+    @Test
+    void race_pauseVsPrepareSend_exactlyOneLegalOutcome() throws Exception {
+        long rev = seedCrossing("pg-r2");
+        var claim = seedPendingAndClaim("pg-r2", rev);
+        int before = sends();
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var barrier = new java.util.concurrent.CyclicBarrier(2);
+        var fPrep = pool.submit(() -> { barrier.await();
+            return outboxTx.prepareSend(claim.rowId(), claim.fencingToken(), NOW); });
+        var fPause = pool.submit(() -> { barrier.await(); admin.pause("pg-r2"); return null; });
+        OutboxTxOps.Prepared prepared = fPrep.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        fPause.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        pool.shutdownNow();
+        OutboxState finalState = outbox.findById(claim.rowId()).orElseThrow().getState();
+        if (prepared.outcome() == OutboxTxOps.PrepareOutcome.AUTHORIZED) {
+            assertEquals(OutboxState.SENDING, finalState, "prepareSend won → SENDING authority preserved after pause");
+        } else {
+            assertEquals(before, sends(), "pause won → zero adapter calls, no SENDING authority");
+            assertNotEquals(OutboxState.SENDING, finalState);
+        }
+    }
+
+    /** Race 3 — a revision bump (edit) vs prepareSend over the OLD-revision claim, started together. A
+     *  stale-revision intent must NEVER receive new send authority. */
+    @Test
+    void race_editVsPrepareSend_staleIntentNeverGetsAuthority() throws Exception {
+        long rev = seedCrossing("pg-r3");
+        var claim = seedPendingAndClaim("pg-r3", rev);
+        int before = sends();
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var barrier = new java.util.concurrent.CyclicBarrier(2);
+        var fEdit = pool.submit(() -> { barrier.await();
+            admin.edit("pg-r3", rev, Comparator.ABOVE, new BigDecimal("55.00"), 2, new BigDecimal("0.10")); return null; });
+        var fPrep = pool.submit(() -> { barrier.await();
+            return outboxTx.prepareSend(claim.rowId(), claim.fencingToken(), NOW); });
+        fEdit.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        OutboxTxOps.Prepared prepared = fPrep.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        pool.shutdownNow();
+        // If prepareSend ran AFTER the edit committed it is denied; if it ran before, it authorized the
+        // then-current revision. Either way, once the edit commits the OLD claim can never send again.
+        if (prepared.outcome() == OutboxTxOps.PrepareOutcome.AUTHORIZED) {
+            // it must have won the lock first (same revision at that instant); a later re-prepare is denied
+            var after = outboxTx.prepareSend(claim.rowId(), claim.fencingToken(), NOW);
+            assertNotEquals(OutboxTxOps.PrepareOutcome.AUTHORIZED, after.outcome());
+        } else {
+            assertEquals(before, sends(), "stale-revision intent received no send authority");
+        }
+    }
+
+    /** Race 4 — EXPLICIT locking proof. Thread A holds the PESSIMISTIC_WRITE fence inside an open
+     *  transaction, pinned by a latch; thread B's pause demonstrably BLOCKS until A releases. The timeout
+     *  is only an assertion around latch-controlled concurrency, not a race coordinator. */
+    @Test
+    void race_pessimisticLockActuallyBlocksCompetitor() throws Exception {
+        seedCrossing("pg-r4");
+        var tt = new org.springframework.transaction.support.TransactionTemplate(txm);
+        var lockAcquired = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var pauseReturnedAt = new java.util.concurrent.atomic.AtomicReference<Long>();
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+
+        // A: open a tx, take the row lock, signal, hold until released
+        var holder = pool.submit(() -> tt.execute(s -> {
+            ruleDefs.findByRuleIdForUpdate("pg-r4").orElseThrow();   // PESSIMISTIC_WRITE
+            lockAcquired.countDown();
+            try { release.await(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+            return null;
+        }));
+
+        assertTrue(lockAcquired.await(5, java.util.concurrent.TimeUnit.SECONDS), "holder acquired the lock");
+        long releasedAt;
+        var competitor = pool.submit(() -> { admin.pause("pg-r4"); pauseReturnedAt.set(System.nanoTime()); return null; });
+        // the competitor must still be blocked while the lock is held
+        Thread.sleep(500);   // NOT a race coordinator — it only samples that the competitor is still waiting
+        assertFalse(competitor.isDone(), "the competing pause BLOCKS while the fence lock is held");
+        releasedAt = System.nanoTime();
+        release.countDown();                               // release the lock
+        holder.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        competitor.get(5, java.util.concurrent.TimeUnit.SECONDS);   // now it completes
+        pool.shutdownNow();
+        assertTrue(pauseReturnedAt.get() >= releasedAt, "pause resolved only AFTER the lock was released");
+        assertTrue(admin.find("pg-r4").orElseThrow().isPaused());
+    }
 }
