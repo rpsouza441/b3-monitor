@@ -54,3 +54,42 @@ blockers can be claimed beyond (c) until the dependency is added and the suite r
 Confirmed `3→4` is a multi-step migration (Jackson 3 + annotation rename + **test-slice
 modularization**), not two tweaks. Main tree stays on 3.3.13 this cycle (no commit authorization; P0/P1
 correctness first). The probe is throwaway and left the production tree byte-unchanged.
+
+---
+
+## Cycle 8 — ATTEMPTED on the checkpoint branch, then REVERTED (migration BLOCKED)
+
+With the authorized local checkpoint in place (`checkpoint/cycle7-reviewed`, functional fixes committed
+at `0daada3`), the 4.1 migration was attempted ON the branch with the commit as the rollback point:
+
+Applied: parent `3.3.13 → 4.1.0`; `spring-boot-starter-test` → **`spring-boot-starter-test-classic`**
+(the Boot-4 backward-compat starter that keeps `@DataJpaTest` and the other old slices on the
+classpath — this clears the cycle-7 test-slice blocker); Jackson 2 → 3 in `RestClientBrapiClient`
+(`tools.jackson.databind.JsonNode`); `@MockBean`/`@SpyBean` → `@MockitoBean`/`@MockitoSpyBean` across
+the tests; Testcontainers renamed `postgresql` → `testcontainers-postgresql` (per the Boot-4 testing
+migration note).
+
+**New blocker — Testcontainers 2.0 artifact coordinates.** `mvn test` on 4.1.0 failed at dependency
+resolution:
+```
+Could not find artifact org.testcontainers:junit-jupiter:jar:2.0.0 in central
+```
+The Boot-4 BOM / Testcontainers 2.0 module coordinates are NOT `org.testcontainers:junit-jupiter:2.0.0`
+as guessed — the groupId/artifactId/version for the 2.0 line must be read from the Boot 4.1 dependency
+BOM (do not guess). The full 134-test suite under 4.1 was therefore not reached; the remaining
+unknowns past this (any runtime/behavioral 4.1 differences) cannot yet be claimed.
+
+**Reverted.** Per the cycle-8 plan's rollback rule, the migration edits (pom + Jackson + annotations)
+were reverted with `git checkout -- pom.xml src`, returning to the green `0daada3` functional-fixes
+commit on 3.3.13 (134 tests green). The migration is **BLOCKED**, not done; nothing migration-related
+was committed.
+
+### Exact remaining migration steps (next dedicated attempt)
+1. From `0daada3`, bump to 4.1.0 + `spring-boot-starter-test-classic` + Jackson 3 + `@MockitoBean`/
+   `@MockitoSpyBean` (all proven to compile/resolve except Testcontainers).
+2. Resolve the correct **Testcontainers 2.0 coordinates** from the Spring Boot 4.1 dependency BOM
+   (the BOM-managed groupId/artifactId; likely a renamed module and a 2.x version that actually exists
+   in Central) — do NOT hardcode a guessed version.
+3. `mvn test` → then `mvn verify -Pdocker-it` on a Docker host.
+4. Commit as a SEPARATE local commit only if green; otherwise revert the migration commit and keep the
+   functional branch.

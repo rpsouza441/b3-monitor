@@ -1,80 +1,63 @@
-# B3 Monitor — Development Handoff (rev 7, cycle 7: submission authority, typed transport, persistent rules)
+# B3 Monitor — Development Handoff (rev 8, cycle 8: local checkpoint + rule lifecycle + attempt ledger)
 
-**Date:** 2026-10-07 · **Repo:** `C:\ws\b3-monitor`
-**Build:** `mvn "-Dspring.profiles.active=test" test` → **BUILD SUCCESS, 123 tests, 0 failures, 0 errors.**
-**Spring Boot 3.3.13.** No commit, no deploy, no real WhatsApp send, no live polling, no real Brapi
-request, no sibling-repo change. Git HEAD unchanged `6de333d`; 7 protected inputs byte-unchanged;
-no `.env`; `.gitignore` present. Docker absent → PostgreSQL IT **NOT_RUN**.
+**Date:** 2026-10-07 · **Repo:** `C:\ws\b3-monitor` · **Branch:** `checkpoint/cycle7-reviewed`
+**Build:** `mvn "-Dspring.profiles.active=test" test` → **BUILD SUCCESS, 134 tests, 0 failures, 0 errors.**
+**Spring Boot 3.3.13.** Local commits only — **NO push**; no real WhatsApp/Brapi, no live polling, no
+deploy, no asset activation, no sibling-repo change. 7 protected inputs byte-unchanged; no `.env`.
+Docker absent → PostgreSQL IT **NOT_RUN**.
 
-Full defect/fix/test detail: `docs/handoff/CYCLE7-REVIEW-EVIDENCE.md`. Probe:
-`docs/handoff/SPRING-41-PROBE-RESULT.md`.
+Full detail: `docs/handoff/CYCLE8-REVIEW-EVIDENCE.md`. Migration: `docs/handoff/SPRING-41-PROBE-RESULT.md`.
 
-## Summary
-Closed the two remaining dispatch P0s (eligibility→send TOCTOU; transport returning arbitrary states),
-imposed an explicit transition matrix, unified 429/2xx quota telemetry, built the persistent typed rule
-registry as the single rule source, added bounded drain + attempt provenance, and advanced versioned
-trading-calendar groundwork. Verified the cycle-6 review's findings against code — all real.
+## 1. Authorized local Git checkpoint (done first)
+Branch `checkpoint/cycle7-reviewed` off `6de333d`. Commits (no push):
+- `41fa2605` — `checkpoint: cycle 7 reviewed baseline` (123 tests, reviewed green state).
+- `0daada39` — `cycle 8: rule lifecycle + RuleMode + attempt ledger + calendar/numeric fixes` (134 tests).
+`.gitignore` hardened to exclude `.env`, the review ZIP, raw logs, `.kiro/`, and the stray root ZIP;
+none of those are committed. The 7 protected inputs hash identically to the baseline.
 
-## P0/P1 fixed
-- **P0-1 (TOCTOU):** `SENDING` submission-authority state. Flow is claim → `prepareSend` (reload +
-  active-claim + lease + re-eligibility, commit `SENDING`+`send_started_at` BEFORE I/O) → `adapter.send`
-  → `record`. Pre-send terminalization wins → no adapter call; post-`SENDING` → never "definitely not
-  sent"; no DB tx across the adapter call.
-- **P0-2 (transport type):** `WahaOutboundAdapter.send()` returns a narrow `SubmissionResult`
-  (ACCEPTED/DEFINITE_FAILURE/UNKNOWN + safe metadata). The dispatcher owns the mapping; `record()`
-  requires `SENDING`. Duplicate-send-by-`PENDING` is impossible by type.
-- **C (transition matrix):** `OutboxTransitions` is the single source of legal edges; `abandon()` legal
-  only from UNKNOWN_OUTCOME/FAILED (ACCEPTED/SENDING/PENDING refused); separate `cancelPending()`.
-- **D (unified quota telemetry):** 429 now carries the same `QuotaSignal` (window/limit/serverDate) as
-  2xx; billing-cycle detection still needs window + matching limit + positive delta; high-water never
-  lowers consumed; all cycle-4/5/6 reset regressions green.
-- **E (persistent rule registry):** `rule_definition` (immutable monotonic revision, enabled/paused,
-  optimistic lock, bounded typed fields) is the single `RuleSource` for the scheduler AND `RuleRegistry`
-  for the guard; `RuleAdminService` (local, no HTTP) edits it. **RUL-01/RUL-05 NOT marked complete.**
-- **F (bounded ops):** `drainBatch()` (default 50, no `Integer.MAX_VALUE`); durable attempt provenance
-  (send/finished/provider-id/accepted-at); full-lifecycle metrics + oldest-pending age.
-- **G (versioned calendar):** `TradingSessionCalendar` + importer/validation contract + fixtures;
-  production stays UNKNOWN/"none" — no invented holidays.
+## 2–9. Functional fixes (all green, committed at `0daada3`)
+- **A pause/resume:** pause cancels unsent PENDING (evidence preserved); resume sets a persisted
+  `rebaseline_required` marker so the first post-resume observation re-baselines and cannot fire — no
+  replay of a pre-pause episode, no CROSSING inferred across the gap.
+- **B RuleMode:** typed `UNSELECTED`(default, fail-closed)/`CROSSING`/`LEVEL`(blocked, Q-19). Scheduler
+  and guard fail closed on non-operable modes; `selectMode` bumps the revision; no auto-promotion.
+- **C attempt ledger:** append-only `outbox_attempt` (V12); a row is created only when SENDING commits;
+  requeue creates a NEW immutable row; `attempts` counts started external submissions, not claims.
+- **D recovery split:** expired IN_FLIGHT → safe PENDING recovery (no send happened); expired SENDING →
+  UNKNOWN_OUTCOME (ambiguous). New legal edge `IN_FLIGHT→PENDING`.
+- **E bypass removal:** `tick(List)` package-private; production uses the single `RuleSource`.
+- **F calendar:** numeric/mode migrations landed (V11); calendar scheduler-consolidation + dataset
+  session windows remain OPEN (see §10).
+- **G numeric:** threshold/hysteresis bounded to NUMERIC(19,6) (lossless round-trip); precision 0..6.
 
-## Tests
-**123 run, 123 pass.** New: `OutboxTransitionsTest`, `PersistentRuleRegistryTest`,
-`TradingCalendarImporterTest`; expanded dispatcher (SENDING/TOCTOU latch), reconciliation (matrix),
-client (429 unified), quota (billing-cycle). `test-evidence-cycle7.log` has the per-suite breakdown.
+## 10. Spring 4.1 migration — BLOCKED, reverted
+On the branch: parent→4.1.0, `spring-boot-starter-test-classic` (clears the cycle-7 `@DataJpaTest`
+test-slice blocker), Jackson 2→3, `@MockitoBean`/`@MockitoSpyBean`. Next blocker: **Testcontainers 2.0
+artifact coordinates** — `org.testcontainers:junit-jupiter:2.0.0` is absent from Central; the Boot-4
+BOM-managed coordinates must be read from the BOM, not guessed. Reverted to `0daada3` (134 green on
+3.3.13); nothing migration-related committed.
 
-## Migrations
-**V9** outbox attempt-lineage columns; **V10** `rule_definition` table. Additive; `ddl-auto=validate`
-on the gated IT proves V1–V10 match the entities.
+## Tests / migrations / IT
+**134 tests pass** (was 123). Migrations **V11** (mode + rebaseline + precision CHECK) and **V12**
+(outbox_attempt). `OutboxPostgresIT` extended to V1–V12 + the recovery split — **NOT_RUN** (Docker
+absent); run `mvn verify -Pdocker-it` on a Docker host.
 
-## PostgreSQL IT
-**NOT_RUN** (Docker absent). Covers V1–V10, two-consumer race, quota race, expired-lease quarantine,
-abandon-terminal. Run `mvn verify -Pdocker-it` on a Docker host.
+## 10. Remaining blockers & next actions
+- **Docker absent** → V1–V12 + races NOT_RUN. H2 is not a PostgreSQL DDL/tx substitute.
+- **Spring 4.1** blocked only on the Testcontainers 2.0 BOM coordinate (one BOM lookup away); the rest
+  of the migration (test-classic starter + Jackson 3 + MockitoBean) is proven to apply.
+- **Calendar** scheduler-consolidation onto `TradingSessionCalendar` + dataset-carried session windows
+  (removing the fixture-only 10:00–17:00 from any production path) is the main open functional item.
+- **No authenticated admin HTTP surface** yet (domain services only — deliberate; no insecure listener).
+- Human/approval gates unchanged (OPERATIONAL_ACTIVATION, WAHA Q-09/Q-25, dedicated-Brapi, Q-19 LEVEL,
+  Q-20, Q-14/27, Q-15, SNAG11). No real WAHA/Brapi/activation/deploy. **No push.**
 
-## Spring probe (no overclaim)
-Main compiles under 4.1.0 after Jackson 2→3; NEW blocker at test compile — Boot 4 test-slice
-modularization (`@DataJpaTest` needs a modular test dependency). Jackson is NOT the only blocker; the
-full 4.1 suite run was not reached. Main tree stays on 3.3.13 (no commit authorization).
-
-## 9. Remaining blockers
-- **Docker absent** → V1–V10 + the real races NOT_RUN. H2 is not a substitute for PostgreSQL DDL/tx proof.
-- **Git checkpoint recommended but not authorized.** HEAD is still `6de333d` with 7 cycles of
-  uncommitted work (10 migrations, 123 tests). The review recommends a single reviewed checkpoint commit
-  before the Spring 4.1 migration — this needs explicit user authorization; nothing was committed.
-- **Spring 3.x fully OSS-EOL;** 4.1 migration is a multi-step change (Jackson 3 + `@MockitoBean` +
-  test-slice modular dependency), scoped in the probe doc; needs a checkpoint + its own cycle.
-- **Human/approval gates unchanged:** OPERATIONAL_ACTIVATION per asset; WAHA contract (Q-09/Q-25);
-  dedicated-Brapi-account declaration; CROSSING/LEVEL (Q-19); previousClose basis (Q-20); version pins
-  (Q-14/27); KNHY11 (Q-15); SNAG11 class. The rule registry has no authenticated admin surface yet
-  (domain service only). No real WAHA/Brapi/activation/deploy.
-
-## 10. Exact recommended next actions (1–3)
-1. **Authorize a single reviewed Git checkpoint commit** of the current green tree (after re-confirming
-   the 7 protected hashes + no `.env`/`target`/secrets), so 7 cycles of work gain a recoverable history
-   before the major migration.
-2. On an isolated Docker host, run `mvn verify -Pdocker-it` (V1–V10 + the SENDING-authority, transition,
-   two-consumer and quota races on real PostgreSQL). Record PASS/NOT_RUN honestly.
-3. Execute the scoped **Spring 4.1 migration** per `SPRING-41-PROBE-RESULT.md` (3.5.6 checkpoint →
-   Jackson 2→3 → `@MockitoBean`/`@MockitoSpyBean` → add the Boot 4 modular JPA test-slice dependency),
-   gated by the full suite + the Docker IT, only with the checkpoint from (1).
-
-OPERATIONAL activation, the real WAHA adapter, live polling and any Brapi account-dedication stay gated
-pending human approval; the authenticated rule-admin surface is the next product step after a checkpoint.
+### Exact next 1–3 actions
+1. Finish the **Spring 4.1 migration** from `0daada3`: resolve the Testcontainers 2.0 coordinates from
+   the Boot 4.1 BOM, `mvn test`, then (on a Docker host) `mvn verify -Pdocker-it`; commit as a separate
+   local commit only if green, else revert and keep `0daada3`.
+2. **Consolidate the calendar**: make the scheduler depend on `TradingSessionCalendar`, carry validated
+   session windows (+ provenance) in the dataset, keep production UNKNOWN until a validated dataset is
+   supplied; drop any production hardcoded hours.
+3. On a Docker host, `mvn verify -Pdocker-it` (V1–V12 + pause/resume, mode, attempt-ledger immutability,
+   IN_FLIGHT-recovery vs SENDING-unknown, two-consumer races). Record PASS/NOT_RUN honestly.
