@@ -20,12 +20,24 @@ b3monitor:
   # Workers start DISABLED. No unattended real-market polling without explicit enablement.
   workers:
     enabled: false
+  # Private admin/status surface (SEC-01). FAIL-CLOSED: off by default, loopback-only, no committed
+  # credentials. When enabled, username + one-way password HASH come from the environment ONLY; if they
+  # are absent the context fails to start (no anonymous / Boot-generated-password fallback).
+  admin:
+    enabled: ${B3MONITOR_ADMIN_ENABLED:false}
+    bind-address: ${B3MONITOR_BIND_ADDRESS:127.0.0.1}
+    username: ${B3MONITOR_ADMIN_USERNAME:}
+    password-hash: ${B3MONITOR_ADMIN_PASSWORD_HASH:}
   brapi:
     base-url: https://brapi.dev/api
     token: ${B3MONITOR_BRAPI_TOKEN:}   # injected from env; never committed
   quote:
     max-age-seconds: 2700   # 45-minute hard freshness guard
     max-skew-seconds: 120
+
+# Bind HTTP to loopback by default (SEC-01). Override only via B3MONITOR_BIND_ADDRESS.
+server:
+  address: ${B3MONITOR_BIND_ADDRESS:127.0.0.1}
 
 logging:
   level:
