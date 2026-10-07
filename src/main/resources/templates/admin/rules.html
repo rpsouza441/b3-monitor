@@ -8,12 +8,15 @@
 <body>
   <nav>
     <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/assets}">Assets</a>
     <a th:href="@{/admin/rules}">Rules</a>
     <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/alerts}">Alerts</a>
     <a th:href="@{/admin/audit}">Audit</a>
     <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
   </nav>
   <h1>Rules</h1>
+  <p style="color:#070" th:if="${ok}" th:text="${ok}"></p>
   <p class="err" th:if="${error}" th:text="${error}"></p>
   <table>
     <tr><th>ID</th><th>Ticker</th><th>Cmp</th><th>Threshold</th><th>Prec</th><th>Hyst</th><th>Mode</th><th>Rev</th><th>Enabled</th><th>Paused</th><th>Actions</th></tr>

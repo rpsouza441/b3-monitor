@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Alerts &amp; outcomes</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:80rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%;font-size:.85rem}td,th{border:1px solid #ccc;padding:.25rem .4rem;text-align:left}form.inline{display:inline}.unc{color:#b00;font-weight:bold}.att{background:#f6f6f6}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/assets}">Assets</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/alerts}">Alerts</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Logical alerts vs channel outcomes (UI-03)</h1>
+  <p><strong>ACCEPTED is not delivery confirmed. UNKNOWN_OUTCOME is not delivered. FAILED/dead-letter is not delivered.</strong>
+     The logical alert and each transport attempt are separate concepts.</p>
+  <table>
+    <tr><th>Logical key</th><th>Rule</th><th>Ticker</th><th>Rev</th><th>Episode</th><th>Source as-of</th>
+        <th>Intent created</th><th>Transport state</th><th>Delivery confirmed</th><th>Provider msg id</th>
+        <th>Reason</th><th>Uncertain</th></tr>
+    <th:block th:each="al : ${alerts}">
+      <tr>
+        <td th:text="${al.logicalKey()}"></td><td th:text="${al.ruleId()}"></td><td th:text="${al.ticker()}"></td>
+        <td th:text="${al.ruleRevision()}"></td><td th:text="${al.episodeEpoch()}"></td>
+        <td th:text="${al.sourceAsOf()}"></td><td th:text="${al.intentCreatedAt()}"></td>
+        <td th:text="${al.state()}"></td><td th:text="${al.deliveryConfirmed()}"></td>
+        <td th:text="${al.providerMessageId()}"></td><td th:text="${al.suppressionReason()}"></td>
+        <td th:classappend="${al.uncertain()} ? 'unc' : ''" th:text="${al.uncertain()} ? 'UNCERTAIN' : 'no'"></td>
+      </tr>
+      <tr class="att" th:each="at : ${al.attempts()}">
+        <td colspan="2">attempt gen=<span th:text="${at.claimGeneration()}"></span> token=<span th:text="${at.fencingToken()}"></span></td>
+        <td colspan="2" th:text="'started ' + ${at.startedAt()}"></td>
+        <td colspan="2" th:text="'finished ' + ${at.finishedAt()}"></td>
+        <td th:text="${at.outcome()}"></td>
+        <td colspan="2" th:text="${at.sanitizedStatus()}"></td>
+        <td th:text="${at.providerMessageId()}"></td>
+        <td th:text="${at.providerAcceptedAt()}"></td>
+      </tr>
+    </th:block>
+  </table>
+</body>
+</html>
