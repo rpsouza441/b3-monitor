@@ -19,7 +19,8 @@ public final class AdminDtos {
     // ---- read models ----
 
     public record StatusView(boolean workersEnabled, String calendarDatasetVersion,
-                             String calendarSessionStatus, long rulesTotal, long rulesActive) {}
+                             String calendarSessionStatus, long rulesTotal, long rulesActive,
+                             long sessionTimeoutSeconds) {}
 
     public record RuleView(String ruleId, String ticker, Comparator comparator, BigDecimal threshold,
                            int precision, BigDecimal hysteresis, RuleMode mode, long revision,
@@ -42,6 +43,34 @@ public final class AdminDtos {
 
     public record AuditEventView(Instant occurredAt, String actor, String action, String ruleId,
                                  Long beforeRevision, Long afterRevision, String outcome, String detail) {}
+
+    /** UI-01 (cycle-12 E): per-asset freshness. {@code hasObservation=false} ⇒ everything UNKNOWN. The
+     *  daily-indicator / Python-context fields are explicit readiness markers, NEVER synthesized values. */
+    public record AssetFreshnessView(String ticker, String authorizationStatus, boolean hasObservation,
+                                     String requestedTicker, String returnedTicker, boolean remapped,
+                                     String currency, BigDecimal price, Instant sourceTime, Instant receiptTime,
+                                     Long ageSeconds, boolean providerStale, boolean eligible,
+                                     String rejectionReasons, String providerContract,
+                                     String dailyIndicators, String pythonContext) {}
+
+    /** UI-03 (cycle-12 F): one logical alert + its transport state + bounded attempt lineage. ACCEPTED is
+     *  NOT delivery; UNKNOWN_OUTCOME is NOT delivered; FAILED/dead-letter is NOT delivered. */
+    public record AlertOutcomeView(
+            // logical alert
+            String logicalKey, String ruleId, String ticker, long ruleRevision, long episodeEpoch,
+            Instant sourceAsOf, Instant intentCreatedAt,
+            // transport / channel state
+            String state, boolean deliveryConfirmed, String providerMessageId, String suppressionReason,
+            boolean uncertain,
+            // attempt lineage (bounded)
+            List<AttemptView> attempts) {}
+
+    public record AttemptView(long claimGeneration, long fencingToken, Instant startedAt, Instant finishedAt,
+                              String outcome, String sanitizedStatus, String providerMessageId,
+                              Instant providerAcceptedAt) {}
+
+    public record AlertOutcomeListView(List<AlertOutcomeView> alerts) {}
+    public record AssetFreshnessListView(List<AssetFreshnessView> assets) {}
 
     // ---- request models ----
 

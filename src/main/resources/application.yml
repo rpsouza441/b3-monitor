@@ -28,6 +28,8 @@ b3monitor:
     bind-address: ${B3MONITOR_BIND_ADDRESS:127.0.0.1}
     username: ${B3MONITOR_ADMIN_USERNAME:}
     password-hash: ${B3MONITOR_ADMIN_PASSWORD_HASH:}
+    # Bounded browser-session inactivity timeout (SEC-01). Safe 30-min default; never infinite.
+    session-timeout-seconds: ${B3MONITOR_ADMIN_SESSION_TIMEOUT_SECONDS:1800}
   brapi:
     base-url: https://brapi.dev/api
     token: ${B3MONITOR_BRAPI_TOKEN:}   # injected from env; never committed
@@ -38,6 +40,10 @@ b3monitor:
 # Bind HTTP to loopback by default (SEC-01). Override only via B3MONITOR_BIND_ADDRESS.
 server:
   address: ${B3MONITOR_BIND_ADDRESS:127.0.0.1}
+  servlet:
+    session:
+      # Bounded browser-session inactivity timeout (SEC-01, cycle-12 C). Matches b3monitor.admin.session-timeout-seconds.
+      timeout: ${B3MONITOR_ADMIN_SESSION_TIMEOUT_SECONDS:1800}s
 
 logging:
   level:

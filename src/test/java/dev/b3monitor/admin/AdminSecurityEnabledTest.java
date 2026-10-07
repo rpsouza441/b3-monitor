@@ -251,4 +251,76 @@ class AdminSecurityEnabledTest {
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/html"));
     }
+
+    // ---- cycle-12 B: UI RBAC — VIEWER may read ordinary pages but NEVER mutate or see audit ----
+
+    @Test
+    void viewerCanReadOrdinaryUiPages() throws Exception {
+        mvc.perform(get("/admin/rules").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+        mvc.perform(get("/admin/assets").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+        mvc.perform(get("/admin/alerts").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+    }
+
+    @Test
+    void viewerUiAuditIsForbidden() throws Exception {
+        mvc.perform(get("/admin/audit").with(user("viewer").roles("VIEWER")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void viewerUiMutationsAreForbiddenAndStateUnchanged() throws Exception {
+        admin.create("ui-rbac", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, BigDecimal.ZERO);
+        long rev = admin.find("ui-rbac").orElseThrow().getRevision();
+        // every mutating POST under /admin/** with a VIEWER + valid CSRF → 403
+        mvc.perform(post("/admin/rules/ui-rbac/pause").with(user("viewer").roles("VIEWER")).with(csrf()))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/admin/rules/ui-rbac/resume").with(user("viewer").roles("VIEWER")).with(csrf()))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/admin/rules/ui-rbac/disable").with(user("viewer").roles("VIEWER")).with(csrf()))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/admin/rules/ui-rbac/mode").with(user("viewer").roles("VIEWER")).with(csrf())
+                        .param("mode", "CROSSING")).andExpect(status().isForbidden());
+        mvc.perform(post("/admin/rules").with(user("viewer").roles("VIEWER")).with(csrf())
+                        .param("ruleId", "ui-rbac2").param("ticker", "PETR4")
+                        .param("comparator", "ABOVE").param("threshold", "10"))
+                .andExpect(status().isForbidden());
+        // state unchanged by the denied VIEWER mutations
+        org.junit.jupiter.api.Assertions.assertEquals(rev, admin.find("ui-rbac").orElseThrow().getRevision());
+        org.junit.jupiter.api.Assertions.assertFalse(admin.find("ui-rbac").orElseThrow().isPaused());
+        org.junit.jupiter.api.Assertions.assertTrue(admin.find("ui-rbac2").isEmpty(), "VIEWER create was denied");
+    }
+
+    @Test
+    void adminUiMutationSucceedsWithCsrf() throws Exception {
+        admin.create("ui-admin", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, BigDecimal.ZERO);
+        mvc.perform(post("/admin/rules/ui-admin/pause").with(user("admin").roles("ADMIN")).with(csrf()))
+                .andExpect(status().is3xxRedirection());   // PRG redirect to /admin/rules
+        org.junit.jupiter.api.Assertions.assertTrue(admin.find("ui-admin").orElseThrow().isPaused());
+    }
+
+    @Test
+    void adminUiMutationWithoutCsrfIsForbidden() throws Exception {
+        admin.create("ui-nocsrf", "WEGE3", Comparator.ABOVE, new BigDecimal("50.00"), 2, BigDecimal.ZERO);
+        mvc.perform(post("/admin/rules/ui-nocsrf/pause").with(user("admin").roles("ADMIN")))
+                .andExpect(status().isForbidden());
+        org.junit.jupiter.api.Assertions.assertFalse(admin.find("ui-nocsrf").orElseThrow().isPaused());
+    }
+
+    @Test
+    void anonymousUiMutationIsDenied() throws Exception {
+        int st = mvc.perform(post("/admin/rules/x/pause").with(csrf()))
+                .andReturn().getResponse().getStatus();
+        org.junit.jupiter.api.Assertions.assertTrue(st == 401 || st == 403, "anonymous UI mutation denied, got " + st);
+    }
+
+    // UI-01 / UI-03 JSON surfaces render for an authenticated reader
+    @Test
+    void assetsAndAlertsJsonRenderForAuthenticated() throws Exception {
+        mvc.perform(get("/api/admin/assets").with(user("viewer").roles("VIEWER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.assets").isArray());
+        mvc.perform(get("/api/admin/alerts?size=5000").with(user("admin").roles("ADMIN")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.alerts").isArray());
+    }
 }

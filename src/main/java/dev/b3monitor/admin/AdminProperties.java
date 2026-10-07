@@ -29,6 +29,15 @@ public class AdminProperties {
     /** One-way password hash (from env B3MONITOR_ADMIN_PASSWORD_HASH when enabled). Never plaintext. */
     private String passwordHash = "";
 
+    /**
+     * Browser-session inactivity timeout in seconds (SEC-01, cycle-12 C). Safe bounded default of 30
+     * minutes; NEVER infinite. A browser session idle longer than this can no longer access the private
+     * UI/API — distinct from HTTP Basic, which re-authenticates whenever credentials are resent. The
+     * value is applied to {@code server.servlet.session.timeout} via {@link #effectiveSessionTimeout()}
+     * and shown in the operator status view.
+     */
+    private int sessionTimeoutSeconds = 1800;
+
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
     public String getBindAddress() { return bindAddress; }
@@ -37,4 +46,11 @@ public class AdminProperties {
     public void setUsername(String username) { this.username = username; }
     public String getPasswordHash() { return passwordHash; }
     public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }
+    public int getSessionTimeoutSeconds() { return sessionTimeoutSeconds; }
+    public void setSessionTimeoutSeconds(int s) { this.sessionTimeoutSeconds = s; }
+
+    /** Effective, bounded session timeout; coerces a non-positive value to the safe default (never infinite). */
+    public java.time.Duration effectiveSessionTimeout() {
+        return java.time.Duration.ofSeconds(sessionTimeoutSeconds > 0 ? sessionTimeoutSeconds : 1800);
+    }
 }

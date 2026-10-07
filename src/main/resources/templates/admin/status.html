@@ -22,6 +22,7 @@
     <tr><th>Calendar session</th><td th:text="${status.calendarSessionStatus()}">UNKNOWN</td></tr>
     <tr><th>Rules total</th><td th:text="${status.rulesTotal()}">0</td></tr>
     <tr><th>Rules active</th><td th:text="${status.rulesActive()}">0</td></tr>
+    <tr><th>Browser session timeout (s)</th><td th:text="${status.sessionTimeoutSeconds()}">1800</td></tr>
   </table>
 </body>
 </html>

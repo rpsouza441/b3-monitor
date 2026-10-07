@@ -88,6 +88,24 @@ public class AdminSecurityConfig {
         return new LoopbackBindValidator(props.getBindAddress());
     }
 
+    /** Loopback is an invariant when enabled (see {@link LoopbackBindValidator}); the bounded browser-session
+     *  inactivity timeout (SEC-01, cycle-12 C) is surfaced in the status view via
+     *  {@link AdminProperties#effectiveSessionTimeout()}. It is ENFORCED to the exact second by
+     *  {@link #sessionTimeoutListener}, because the container's own {@code session.timeout} truncates to
+     *  whole minutes and so cannot honor a sub-minute policy. */
+    @Bean
+    @ConditionalOnProperty(name = "b3monitor.admin.enabled", havingValue = "true")
+    public org.springframework.boot.web.servlet.ServletListenerRegistrationBean<jakarta.servlet.http.HttpSessionListener>
+            sessionTimeoutListener(AdminProperties props) {
+        int seconds = (int) props.effectiveSessionTimeout().getSeconds();
+        jakarta.servlet.http.HttpSessionListener listener = new jakarta.servlet.http.HttpSessionListener() {
+            @Override public void sessionCreated(jakarta.servlet.http.HttpSessionEvent se) {
+                se.getSession().setMaxInactiveInterval(seconds);   // exact seconds, honored by the container
+            }
+        };
+        return new org.springframework.boot.web.servlet.ServletListenerRegistrationBean<>(listener);
+    }
+
     /** Fails context startup unless the configured bind address is a loopback literal. */
     static final class LoopbackBindValidator {
         LoopbackBindValidator(String bindAddress) {
@@ -130,9 +148,14 @@ public class AdminSecurityConfig {
             .authorizeHttpRequests(a -> a
                 // the login page + its POST processing URL and logout are the only unauthenticated routes
                 .requestMatchers("/admin/login", "/admin/logout").permitAll()
-                // private UI pages require an authenticated session
-                .requestMatchers("/admin/**").authenticated()
+                // UI RBAC (cycle-12 B): the audit view and EVERY mutating POST under /admin/** are ADMIN-only,
+                // matching the JSON API. These must precede the generic /admin/** authenticated rule.
+                .requestMatchers(HttpMethod.GET, "/admin/audit").hasRole("ADMIN")
+                .requestMatchers(HttpMethod.POST, "/admin/**").hasRole("ADMIN")
+                // ordinary read-only UI pages: any authenticated user (ADMIN or a future VIEWER)
+                .requestMatchers(HttpMethod.GET, "/admin/**").authenticated()
                 // admin API: reads authenticated, mutations ADMIN
+                .requestMatchers(HttpMethod.GET, "/api/admin/audit").hasRole("ADMIN")
                 .requestMatchers(HttpMethod.GET, "/api/admin/**").authenticated()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 // everything else is denied — nothing is public by omission
