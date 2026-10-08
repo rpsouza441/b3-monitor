@@ -34,4 +34,11 @@ public class AppConfig {
     public RuleEvaluator ruleEvaluator(QuoteValidator quoteValidator) {
         return new RuleEvaluator(quoteValidator);
     }
+
+    @Bean
+    public dev.b3monitor.domain.analytics.AnalyticsSnapshotValidator analyticsSnapshotValidator(
+            dev.b3monitor.domain.auth.AssetCatalog catalog, Clock clock,
+            tools.jackson.databind.ObjectMapper mapper) {
+        return new dev.b3monitor.domain.analytics.AnalyticsSnapshotValidator(catalog, clock, mapper);
+    }
 }
