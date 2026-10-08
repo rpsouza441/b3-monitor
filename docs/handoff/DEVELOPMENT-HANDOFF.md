@@ -1,19 +1,20 @@
-# B3 Monitor — Development Handoff (rev 16)
+# B3 Monitor — Development Handoff (rev 17)
 
 **MVP vertical:** validated B3 quote monitoring with explainable CROSSING price alerts, a durable
 submission-authority outbox, a linearizable rule-lifecycle fence, an append-only admin audit ledger, a
 fail-closed authenticated private admin surface + browser UI (status / readiness / assets / analytics /
 imports / rules / outbox / alerts / audit), and a fail-closed analytics-snapshot CONSUMER contract with an
-ADMIN preview→commit importer. Offline/local only — no live Brapi, no live WAHA, no activation, no deploy.
+HMAC-bound ADMIN preview→commit importer. Offline/local only — no live Brapi, no live WAHA, no activation, no deploy.
 
 ## Build & test
 
-- **Spring Boot 4.1.1**, Java 21. `mvn test` → **231 passed, 0 failures, 0 errors**.
-- **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` (V1–V14 incl. the V14 analytics schema +
-  the extended audit CHECK) + `LifecycleFencePostgresIT` (true concurrency races; the lock-wait proof reads
-  `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` lock through the SAME Hibernate/JPA connection via
-  `EntityManager.unwrap(Session).doReturningWork`, with a `pg_blocking_pids()` block assertion) compile and
-  run under `mvn verify -Pdocker-it`. Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
+- **Spring Boot 4.1.1**, Java 21. `mvn test` → **258 passed, 0 failures, 0 errors**.
+- **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` (V1–V14 incl. V14 analytics schema, the
+  extended audit CHECK, and a concurrent same-snapshotId commit → exactly one durable) + `LifecycleFencePostgresIT`
+  (concurrency races; the lock-wait proof reads `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` lock
+  through the SAME Hibernate/JPA connection via `EntityManager.unwrap(Session).doReturningWork`, with a
+  `pg_blocking_pids()` block assertion) compile and run under `mvn verify -Pdocker-it`. Runtime
+  PESSIMISTIC_WRITE: **NOT_PROVEN**.
 - Migrations **V1–V14** (Flyway). V14 = analytics_snapshot/analytics_context provenance + IMPORT_SNAPSHOT audit action.
 
 ## Git (branch `checkpoint/cycle7-reviewed`, NO push — `git branch -r` = only `origin/main`)
@@ -24,13 +25,31 @@ ADMIN preview→commit importer. Offline/local only — no live Brapi, no live W
 | `62f053f`..`653674c` | cycle-13 (UI-03 full lifecycle, true concurrency races, bounded session timeout, docs) |
 | `c9f0aac`..`8d5eec2` | cycle-14 (concurrency-test integrity, UI-03 ordering, README/STATE drift, UI-02 readiness, docs) |
 | `f07b8e7`..`06492c6` | cycle-15 (transaction-bound lock proof, no swallowed races, factual drift, readiness dimensions, docs) |
-| `28c16a3` | **cycle-16: analytics consumer contract v1 + fail-closed validator + V14 provenance** |
-| `8cb0a09` | **cycle-16: ADMIN preview→commit importer + UI-01 analytics context + UI-02 import history** |
-| `ac9ee2b` | **cycle-16: analytics import validation/idempotency/RBAC + V14 postgres schema tests** |
-| `c7ecc40` | **cycle-16: analytics snapshot producer-boundary document** |
-| (this) | **cycle-16 docs rev 16 + CYCLE16 evidence + archive CYCLE15** |
+| `28c16a3`..`e404d39` | cycle-16 (analytics consumer contract v1 + validator + V14, preview→commit importer, UI-01/UI-02, producer doc, tests, docs) |
+| `2b0c275` | **cycle-17: HMAC-bound preview→commit token (actor/schema/snapshot/content/purpose/expiry)** |
+| `41abdfb` | **cycle-17: strict analytics parser + time invariants** |
+| `0bf6300` | **cycle-17: adversarial hardening tests (token, golden checksum, bounds, time, selection, side-effects, concurrency)** |
+| `f2c85f6` | **cycle-17: analytics contract — token/parser rules, context selection, producer acceptance checklist** |
+| (this) | **cycle-17 docs rev 17 + CYCLE17 evidence + archive CYCLE16** |
 
-## Cycle-16 changes (detail: `CYCLE16-REVIEW-EVIDENCE.md`)
+## Cycle-17 changes (detail: `CYCLE17-REVIEW-EVIDENCE.md`)
+
+- **HMAC preview token (item 2).** Replaced the bare-checksum token with an HMAC-SHA256 over
+  `purpose|schemaVersion|snapshotId|checksum|actor|issuedAt|ttl`, constant-time verified and re-bound to the
+  live commit; cannot be replayed across actor/content/snapshot/schema or after expiry; tamper/wrong-purpose/
+  malformed reject fail-closed; no secret or raw payload in the token.
+- **Strict parser + time invariants (items 3/5).** STRICT_DUPLICATE_DETECTION; unknown top-level fields
+  rejected (strict v1); depth ≤ 12; non-finite rejected; numeric scale/precision/magnitude bounds; duplicate
+  tickers rejected; generatedAt-not-future; per-record asOf ≤ marketAsOf; importedAt from the injected clock.
+- **Canonical checksum golden (item 4).** reorder/whitespace → same; value/asOf → different; dup-key rejected.
+- **Atomicity/concurrency (item 6).** Concurrent same-snapshotId commit IT → exactly one durable (unique
+  constraint), no duplicate rows, no swallowed error. NOT_RUN (Docker absent).
+- **Current-context selection (item 7).** By `marketAsOf` DESC, `importedAt` tie-break — older-asOf imported
+  later never becomes current.
+- **Synthetic ≠ VERIFIED (item 8)** and **side-effect non-interference (item 9)** proven by test.
+- **Producer acceptance checklist (item 11)** documented; `projecao-carteira` untouched; no real snapshot consumed.
+
+## Cycle-16 changes (detail: `archive/cycles/CYCLE16-REVIEW-EVIDENCE.md`)
 
 - **Consumer contract v1 (FIN-01/03/04).** `AnalyticsSnapshotContract` + a fail-closed
   `AnalyticsSnapshotValidator`: typed daily indicators (IND-01/02/04/05) each with its own readiness + FIN-02
