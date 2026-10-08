@@ -18,9 +18,10 @@
   </nav>
   <h1>Operator readiness (UI-02 — read-only)</h1>
   <p>Read-only visibility. This page activates nothing: no import, no live poll, no send, no mutation.
-     Components not yet wired are shown as <strong>NOT_INTEGRATED</strong> with an explicit cause —
-     UI-02 remains <strong>PARTIAL</strong> (the acceptance criterion that imports create audit revisions
-     is not met by a view).</p>
+     Each component reports three independent dimensions — <strong>wiring</strong> (is the code wired?),
+     <strong>operational</strong> (is it allowed to act?) and <strong>runtime</strong> (has it been proven
+     at runtime?) — so integration is never conflated with authorization or verification. UI-02 remains
+     <strong>PARTIAL</strong> (the acceptance criterion that imports create audit revisions is not met by a view).</p>
 
   <h2>Summary</h2>
   <dl>
@@ -45,11 +46,15 @@
 
   <h2>Components</h2>
   <table>
-    <tr><th>Component</th><th>State</th><th>Detail</th></tr>
+    <tr><th>Component</th><th>Wiring</th><th>Operational</th><th>Runtime</th><th>Detail</th></tr>
     <tr th:each="c : ${r.components()}">
       <td th:text="${c.component()}"></td>
-      <td th:text="${c.state()}"
-          th:classappend="${c.state() == 'READY' or c.state() == 'ENABLED'} ? 'ok' : (${c.state() == 'NOT_INTEGRATED' or c.state() == 'NOT_READY'} ? 'ni' : 'fc')"></td>
+      <td th:text="${c.wiringStatus()}"
+          th:classappend="${c.wiringStatus() == 'READY'} ? 'ok' : (${c.wiringStatus() == 'NOT_INTEGRATED'} ? 'ni' : 'fc')"></td>
+      <td th:text="${c.operationalStatus()}"
+          th:classappend="${c.operationalStatus() == 'AUTHORIZED'} ? 'ok' : (${c.operationalStatus() == 'BLOCKED_BY_GATE'} ? 'ni' : 'fc')"></td>
+      <td th:text="${c.runtimeStatus()}"
+          th:classappend="${c.runtimeStatus() == 'VERIFIED'} ? 'ok' : (${c.runtimeStatus() == 'NOT_READY' or c.runtimeStatus() == 'NOT_RUN'} ? 'ni' : 'fc')"></td>
       <td th:text="${c.detail()}"></td>
     </tr>
   </table>

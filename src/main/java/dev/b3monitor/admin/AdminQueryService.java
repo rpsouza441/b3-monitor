@@ -173,12 +173,13 @@ public class AdminQueryService {
     }
 
     /**
-     * UI-02 (cycle-14 E): a READ-ONLY operator readiness snapshot — catalog/authorization summary,
-     * calendar dataset readiness, workers flag, rule counts, and the integration readiness of the
-     * components that are NOT yet wired (Brapi contract/quota, Python/daily-indicator, import), each with
-     * an explicit cause. Bounded (counts + 23 single authorization probes). It activates NOTHING: there is
-     * no import, no live poll, no send, no mutation here. The literal UI-02 acceptance (imports creating
-     * audit revisions) is NOT met by this view — it advances VISIBILITY only; UI-02 stays PARTIAL.
+     * UI-02 (cycle-14 E; refined cycle-15 D): a READ-ONLY operator readiness snapshot — catalog/
+     * authorization summary, calendar dataset readiness, workers flag, rule counts, and the readiness of
+     * each operator component across THREE INDEPENDENT dimensions (wiring / operational / runtime) so code
+     * integration is never conflated with operational authorization or runtime verification. Bounded (counts
+     * + 23 single authorization probes). It activates NOTHING: there is no import, no live poll, no send, no
+     * mutation here. The literal UI-02 acceptance (imports creating audit revisions) is NOT met by this view
+     * — it advances VISIBILITY only; UI-02 stays PARTIAL.
      */
     @Transactional(readOnly = true)
     public ReadinessView readiness() {
@@ -206,25 +207,38 @@ public class AdminQueryService {
         String calReadiness = calReady ? "READY" : "NOT_READY";
 
         var components = List.of(
-                new ReadinessComponentView("asset_catalog", "READY",
+                // asset_catalog: wired, no operational dimension, verified by startup load.
+                new ReadinessComponentView("asset_catalog", "READY", "NOT_APPLICABLE", "VERIFIED",
                         catalog.tickers().size() + " canonical tickers (trusted catalog; class never inferred from suffix)"),
-                new ReadinessComponentView("operational_authorization",
-                        authorized == 0 ? "FAIL_CLOSED" : "PARTIAL",
-                        "all assets start NOT_AUTHORIZED; " + authorized + " authorized / " + partial
-                                + " partial-identity / " + quarantined + " quarantined / " + notAuthorized + " not-authorized"),
-                new ReadinessComponentView("trading_calendar", calReadiness,
-                        calReady ? "dataset " + calVersion + " loaded (" + calendar.zone() + ")"
-                                 : "no validated dataset — fail-closed, every session UNKNOWN, holidays never invented"),
-                new ReadinessComponentView("workers", workersEnabled ? "ENABLED" : "DISABLED",
-                        workersEnabled ? "collection/dispatch workers enabled" : "workers disabled (no real polling or send)"),
-                new ReadinessComponentView("brapi_contract", "NOT_INTEGRATED",
-                        "live Brapi is a human gate (no credential, no real poll in this milestone); quota provenance modelled but not exercised live"),
-                new ReadinessComponentView("python_daily_indicators", "NOT_INTEGRATED",
+                // operational_authorization: wired and executable, but every asset starts fail-closed.
+                new ReadinessComponentView("operational_authorization", "READY",
+                        authorized == 0 ? "BLOCKED_BY_GATE" : "AUTHORIZED", "VERIFIED",
+                        "executable per-asset egress gate; all assets start NOT_AUTHORIZED — " + authorized
+                                + " authorized / " + partial + " partial-identity / " + quarantined
+                                + " quarantined / " + notAuthorized + " not-authorized (CROSSING-only operable; UNSELECTED fail-closed)"),
+                // trading_calendar: the CODE may be ready while the DATASET is not loaded — distinct axes.
+                new ReadinessComponentView("trading_calendar", "READY", "NOT_APPLICABLE",
+                        calReady ? "VERIFIED" : "NOT_READY",
+                        calReady ? "calendar code wired; dataset " + calVersion + " loaded (" + calendar.zone() + ")"
+                                 : "calendar code wired, but no validated dataset — fail-closed, every session UNKNOWN, holidays never invented"),
+                // workers: wired; runtime reflects whether they are enabled (deliberately disabled this milestone).
+                new ReadinessComponentView("workers", "READY", "BLOCKED_BY_GATE",
+                        workersEnabled ? "VERIFIED" : "NOT_RUN",
+                        workersEnabled ? "collection/dispatch workers enabled" : "workers disabled (no real polling or send in this milestone)"),
+                // brapi_contract: client code is wired (v2 contract + quota provenance), but live calls are a
+                // human gate and have never been exercised at runtime.
+                new ReadinessComponentView("brapi_contract", "READY", "BLOCKED_BY_GATE", "NOT_RUN",
+                        "Brapi v2 client + quota-provenance code is wired, but live Brapi is a human gate "
+                                + "(no credential, no real poll in this milestone); the live contract is NOT exercised"),
+                // python_daily_indicators: not wired at all.
+                new ReadinessComponentView("python_daily_indicators", "NOT_INTEGRATED", "NOT_APPLICABLE", "NOT_RUN",
                         "daily indicators (SMA/RSI/EMA/volume) and Python context are not wired; values are never synthesized"),
-                new ReadinessComponentView("catalog_import", "NOT_INTEGRATED",
+                // catalog_import: not wired at all.
+                new ReadinessComponentView("catalog_import", "NOT_INTEGRATED", "NOT_APPLICABLE", "NOT_APPLICABLE",
                         "no import pipeline is wired; catalog is a static trusted list — no destructive import exists"),
-                new ReadinessComponentView("waha_delivery", "NOT_INTEGRATED",
-                        "real WAHA send is a human gate; only a simulated adapter exists, no recipients configured")
+                // waha_delivery: only a simulated adapter exists (PARTIAL wiring); real send is a human gate.
+                new ReadinessComponentView("waha_delivery", "PARTIAL", "BLOCKED_BY_GATE", "NOT_RUN",
+                        "only a simulated outbound adapter exists; real WAHA send is a human gate, no recipients configured, no live transport verified")
         );
 
         return new ReadinessView(catalog.tickers().size(), authorized, partial, quarantined, notAuthorized,

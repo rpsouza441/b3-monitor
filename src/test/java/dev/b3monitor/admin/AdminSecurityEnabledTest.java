@@ -264,16 +264,28 @@ class AdminSecurityEnabledTest {
 
     @Test
     void readinessIsReadOnlyAndViewerReadable() throws Exception {
-        // UI-02 readiness is a read-only JSON snapshot: viewer-readable, reports catalog + NOT_INTEGRATED
-        // components, and introduces no mutation/activation endpoint.
+        // UI-02 readiness is a read-only JSON snapshot: viewer-readable, reports catalog + the three
+        // independent readiness dimensions (wiring/operational/runtime), and introduces no mutation/activation endpoint.
         mvc.perform(get("/api/admin/readiness").with(user("viewer").roles("VIEWER")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.catalogAssets").value(23))
                 .andExpect(jsonPath("$.workersEnabled").value(false))
-                .andExpect(jsonPath("$.components[?(@.component=='python_daily_indicators')].state")
+                // python_daily_indicators: wiring NOT_INTEGRATED
+                .andExpect(jsonPath("$.components[?(@.component=='python_daily_indicators')].wiringStatus")
                         .value(org.hamcrest.Matchers.hasItem("NOT_INTEGRATED")))
-                .andExpect(jsonPath("$.components[?(@.component=='catalog_import')].state")
-                        .value(org.hamcrest.Matchers.hasItem("NOT_INTEGRATED")));
+                // catalog_import: wiring NOT_INTEGRATED
+                .andExpect(jsonPath("$.components[?(@.component=='catalog_import')].wiringStatus")
+                        .value(org.hamcrest.Matchers.hasItem("NOT_INTEGRATED")))
+                // brapi_contract: code wired (READY) but operationally BLOCKED_BY_GATE and runtime NOT_RUN
+                .andExpect(jsonPath("$.components[?(@.component=='brapi_contract')].wiringStatus")
+                        .value(org.hamcrest.Matchers.hasItem("READY")))
+                .andExpect(jsonPath("$.components[?(@.component=='brapi_contract')].operationalStatus")
+                        .value(org.hamcrest.Matchers.hasItem("BLOCKED_BY_GATE")))
+                .andExpect(jsonPath("$.components[?(@.component=='brapi_contract')].runtimeStatus")
+                        .value(org.hamcrest.Matchers.hasItem("NOT_RUN")))
+                // waha_delivery: PARTIAL wiring (simulated adapter only)
+                .andExpect(jsonPath("$.components[?(@.component=='waha_delivery')].wiringStatus")
+                        .value(org.hamcrest.Matchers.hasItem("PARTIAL")));
         // no POST activation/import endpoint exists under readiness
         mvc.perform(post("/api/admin/readiness").with(user("admin").roles("ADMIN")).with(csrf()))
                 .andExpect(status().is4xxClientError());

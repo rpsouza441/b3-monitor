@@ -74,11 +74,18 @@ public final class AdminDtos {
     public record AlertOutcomeListView(List<AlertOutcomeView> alerts) {}
     public record AssetFreshnessListView(List<AssetFreshnessView> assets) {}
 
-    /** UI-02 (cycle-14 E): a READ-ONLY operator readiness snapshot. Each component reports a readiness
-     *  state plus an explicit human-readable reason. NOTHING here activates, imports, polls or sends — it
-     *  only makes operator state and its gaps visible. {@code NOT_READY}/{@code NOT_INTEGRATED} causes are
-     *  stated literally so the UI never implies a capability that is not actually wired. */
-    public record ReadinessComponentView(String component, String state, String detail) {}
+    /** UI-02 (cycle-14 E; refined cycle-15 D): a READ-ONLY operator readiness snapshot. Each component
+     *  reports THREE INDEPENDENT dimensions so code integration, operational authorization and runtime
+     *  verification are never conflated:
+     *  <ul>
+     *    <li>{@code wiringStatus}: READY | PARTIAL | NOT_INTEGRATED — is the code actually wired?</li>
+     *    <li>{@code operationalStatus}: AUTHORIZED | BLOCKED_BY_GATE | NOT_APPLICABLE — is it allowed to act?</li>
+     *    <li>{@code runtimeStatus}: VERIFIED | NOT_RUN | NOT_VERIFIED | NOT_APPLICABLE — has it been proven at runtime?</li>
+     *  </ul>
+     *  plus an explicit human-readable {@code detail}. NOTHING here activates, imports, polls or sends — it
+     *  only makes operator state and its gaps visible, and never overstates readiness. */
+    public record ReadinessComponentView(String component, String wiringStatus, String operationalStatus,
+                                         String runtimeStatus, String detail) {}
 
     public record ReadinessView(
             long catalogAssets,
