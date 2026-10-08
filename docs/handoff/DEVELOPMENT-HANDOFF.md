@@ -1,23 +1,50 @@
-# B3 Monitor — Development Handoff (rev 17)
+# B3 Monitor — Development Handoff (rev 18)
 
 **MVP vertical:** validated B3 quote monitoring with explainable CROSSING price alerts, a durable
 submission-authority outbox, a linearizable rule-lifecycle fence, an append-only admin audit ledger, a
 fail-closed authenticated private admin surface + browser UI (status / readiness / assets / analytics /
-imports / rules / outbox / alerts / audit), and a fail-closed analytics-snapshot CONSUMER contract with an
-HMAC-bound ADMIN preview→commit importer. Offline/local only — no live Brapi, no live WAHA, no activation, no deploy.
+imports / rules / outbox / alerts / audit), and a fail-closed analytics-snapshot CONSUMER with an
+HMAC full-document-bound ADMIN preview→commit importer and lossless structured provenance. Offline/local
+only — no live Brapi, no live WAHA, no activation, no deploy.
 
 ## Build & test
 
-- **Spring Boot 4.1.1**, Java 21. `mvn test` → **258 passed, 0 failures, 0 errors**.
-- **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` (V1–V14 incl. V14 analytics schema, the
-  extended audit CHECK, and a concurrent same-snapshotId commit → exactly one durable) + `LifecycleFencePostgresIT`
-  (concurrency races; the lock-wait proof reads `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` lock
-  through the SAME Hibernate/JPA connection via `EntityManager.unwrap(Session).doReturningWork`, with a
-  `pg_blocking_pids()` block assertion) compile and run under `mvn verify -Pdocker-it`. Runtime
-  PESSIMISTIC_WRITE: **NOT_PROVEN**.
-- Migrations **V1–V14** (Flyway). V14 = analytics_snapshot/analytics_context provenance + IMPORT_SNAPSHOT audit action.
+- **Spring Boot 4.1.1**, Java 21. `mvn test` → **272 passed, 0 failures, 0 errors**.
+- **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` (V1–V15, V15 analytics lossless schema,
+  concurrent same-snapshotId commit) + `LifecycleFencePostgresIT` (concurrency races; transaction-bound
+  `pg_backend_pid()`/`pg_blocking_pids()` lock-wait proof) compile and run under `mvn verify -Pdocker-it`.
+  Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
+- Migrations **V1–V15** (Flyway). V15 = document_digest + NUMERIC(24,12) indicators + structured
+  analytics_context_metric child table.
 
 ## Git (branch `checkpoint/cycle7-reviewed`, NO push — `git branch -r` = only `origin/main`)
+
+| SHA | What |
+|---|---|
+| `0035487`..`653674c` | cycle-12/13 (UI RBAC, session expiry, UI-01/UI-03, true concurrency races, docs) |
+| `c9f0aac`..`06492c6` | cycle-14/15 (concurrency-test integrity, lock-proof identity, readiness dimensions, drift, docs) |
+| `28c16a3`..`e404d39` | cycle-16 (analytics consumer contract v1 + V14 + preview→commit importer + UI-01/UI-02 + producer doc) |
+| `2b0c275`..`23d0141` | cycle-17 (HMAC preview token, strict parser, time invariants, golden checksum, concurrency IT, docs) |
+| `f782ea1` | **cycle-18: V15 lossless analytics + full-document token binding + document-identity idempotency** |
+| `fe83b50` | **cycle-18: strict nested v1 schema + length-prefixed checksum (quality fields)** |
+| `eaacb28` | **cycle-18: per-ticker current selection + remove invented stale SLA + HTTP body-size limit** |
+| `45519c3` | **cycle-18: full-document/per-ticker/numeric/lossless/checksum tests** |
+| (this) | **cycle-18 docs rev 18 + CYCLE18 evidence + archive CYCLE17** |
+
+## Cycle-18 changes (detail: `CYCLE18-REVIEW-EVIDENCE.md`)
+
+- **A full-document binding** — token binds records checksum AND full-document digest; envelope-only /
+  whitespace change after preview rejected.
+- **B document-identity idempotency** — same snapshotId+document ⇒ NO_OP; changed envelope/records ⇒ CONFLICT;
+  `document_digest` persisted (V15; legacy V14 rows NULL).
+- **C unambiguous token** — base64url-per-claim (pipe-safe); configured-but-short secret fails startup;
+  TTL bounded min+max; overflow-safe expiry.
+- **D per-ticker selection**; **E** no invented stale SLA; **F** NUMERIC(24,12) matches validator;
+  **G** lossless structured context metrics (incl. quality) + dup-name rejection; **H** strict nested schema +
+  status vocabulary + IANA tz; **I** length-prefixed checksum incl. quality; **J** HTTP body-size limit;
+  **K** typed concurrent-commit UX (NO_OP/CONFLICT, never a generic 500).
+
+## Git — earlier cycles
 
 | SHA | What |
 |---|---|
@@ -97,52 +124,49 @@ HMAC-bound ADMIN preview→commit importer. Offline/local only — no live Brapi
 - **E — UI-02 readiness** read-only view (`/admin/readiness` + JSON) with explicit NOT_INTEGRATED/NOT_READY
   causes. Activates nothing. **UI-02 stays PARTIAL.**
 
-## Cycle-13 changes (detail: `archive/cycles/CYCLE13-REVIEW-EVIDENCE.md`)
+## Requirement status (acceptance-literal, current)
 
-- **P1-A** — `/admin/alerts` (+ `GET /api/admin/alerts`) now shows the FULL transport lifecycle
-  (PENDING…SUPPRESSED) via a bounded `findRecentAlerts` query (hard-capped 100, ≤20 child attempts),
-  not just dead-letters. ACCEPTED≠delivery_confirmed; UNKNOWN uncertain; FAILED/CANCELLED/EXPIRED/SUPPRESSED
-  shown. Reconciliation (`/admin/outbox`) unchanged.
-- **P1-B** — `LifecycleFencePostgresIT` gained true concurrent races (CyclicBarrier + 2 threads + independent
-  tx + a latch-held `PESSIMISTIC_WRITE` lock proof). Compiled; **NOT_RUN** (no Docker) — runtime proof pending.
-- **P2** — session timeout genuinely bounded (explicit 24h cap + 1800 default; 1s test preserved).
-
-## Requirement status (acceptance-literal)
-
-- **SEC-01 → DONE** (timeout claim now accurate).
+- **SEC-01 → DONE** (loopback-only admin surface + proven real session expiry).
 - **UI-03 → DONE** for the current outbox contract (full lifecycle, logical/transport/attempt separated).
-- **UI-01 → PARTIAL** (freshness real; daily indicators + Python context NOT_INTEGRATED).
-- **UI-02 → PARTIAL** (rules audited + pause stops collection; catalog/policies/imports not covered).
+- **UI-01 → PARTIAL** (quote freshness real; analytics context now inspectable + separate, but real
+  daily-indicator/Python values require a producer that does not exist yet — NOT_INTEGRATED).
+- **UI-02 → PARTIAL** (rules audited + readiness/import visibility; no real producer snapshot consumed —
+  the analytics consumer is CONSUMER_VERIFIED_SYNTHETIC).
 - **RUL-03/RUL-05 → PARTIAL** (Q-19 unresolved; LEVEL/false-confirmation/cooldown fail-closed).
-- **PostgreSQL runtime gate → NOT_RUN**; **true-race proof → written, NOT_RUN** pending Docker.
+- **PostgreSQL runtime gate → NOT_RUN** (Docker absent); ITs compile.
 
 ## Running the admin surface + UI locally
 
 Disabled by default. Enable on loopback: `B3MONITOR_ADMIN_ENABLED=true`, `B3MONITOR_ADMIN_USERNAME=<user>`,
 `B3MONITOR_ADMIN_PASSWORD_HASH=<bcrypt>`, optional `B3MONITOR_ADMIN_SESSION_TIMEOUT_SECONDS` (default 1800,
-coerced to [1..86400]), `B3MONITOR_BIND_ADDRESS=127.0.0.1` (loopback enforced). Non-loopback or missing creds
-⇒ startup fails. UI at `/admin/login`; JSON API under `/api/admin/**`.
+coerced to [1..86400]), optional `B3MONITOR_ADMIN_ANALYTICS_TOKEN_SECRET` (>=16 chars; a configured-but-short
+secret fails startup, otherwise a per-process random secret is used), `B3MONITOR_BIND_ADDRESS=127.0.0.1`
+(loopback enforced). Non-loopback or missing creds ⇒ startup fails. UI at `/admin/login`; JSON API under
+`/api/admin/**`. Analytics import: `/admin/imports` (ADMIN preview→commit) + `/admin/analytics` (per-ticker
+context). Importing authorizes nothing, enables no worker, triggers no Brapi/WAHA, changes no rule.
 
 ## Open items / recommended next 1–3 actions
 
-1. **PostgreSQL IT on a Docker host** (`mvn verify -Pdocker-it`): run the true concurrency races + V1–V13
-   validate + V13 audit/index. This is the only remaining runtime proof of PESSIMISTIC_WRITE behaviour.
-2. **UI-01 completion** needs a real daily-indicator / Python-context integration (currently NOT_INTEGRATED,
-   gated on the HIS-*/Python boundary); **UI-02 breadth** (catalog/policy/import readiness visibility).
+1. **PostgreSQL IT on a Docker host** (`mvn verify -Pdocker-it`): V1–V15 validate (incl. the V15 lossless
+   context schema + NUMERIC(24,12)), the concurrent same-snapshotId commit, and the transaction-bound
+   PESSIMISTIC_WRITE races — the remaining runtime proofs.
+2. **Producer acceptance gate** (`docs/contracts/ANALYTICS-SNAPSHOT-CONTRACT.md`): obtain sibling-change
+   authorization for `projecao-carteira`, then a shared canonical-checksum golden test, to move the consumer
+   past CONSUMER_VERIFIED_SYNTHETIC. Not started; human-gated.
 3. **RUL-03/RUL-05 + LEVEL (Q-19)** remain human-gated.
 
 ## Still prohibited
 
-push · live Brapi · live WAHA · OPERATIONAL_ACTIVATION · deploy · production DB · sibling-repo changes ·
-non-synthetic credentials · trading. Seven protected inputs byte-identical.
+push · modify projecao-carteira/ticker-scraper · live Brapi · live WAHA · recipients · OPERATIONAL_ACTIVATION
+· deploy · production DB · trading · LEVEL/false-confirmation/cooldown while Q-19 is open. Seven protected
+inputs byte-identical; phase closure 0/8; all 23 assets NOT_AUTHORIZED.
 
 ## Handoff packaging — SINGLE ATTACHMENT (count derived from the FINAL ZIP)
 
-Active docs: `docs/handoff/DEVELOPMENT-HANDOFF.md`, `docs/handoff/CYCLE14-REVIEW-EVIDENCE.md`.
-Archive (in the ZIP): `docs/handoff/archive/cycles/` (CYCLE6–CYCLE13), `docs/handoff/archive/migrations/`.
-Generated/gitignored: `b3-monitor-review.zip`, `test-evidence-cycle14.log`. The ZIP's actual entry count +
-SHA-256 are read back FROM the built ZIP and reported in the closure message. `.env.example` is a template,
-NOT a real `.env`.
+Active docs: `docs/handoff/DEVELOPMENT-HANDOFF.md`, `docs/handoff/CYCLE18-REVIEW-EVIDENCE.md`.
+Archive (in the ZIP): `docs/handoff/archive/cycles/` (CYCLE6–CYCLE17). Generated/gitignored:
+`b3-monitor-review.zip`, `test-evidence-cycle18.log`. The ZIP's actual entry count + SHA-256 are read back
+FROM the built ZIP and reported in the closure message. `.env.example` is a template, NOT a real `.env`.
 
 **Para revisão no ChatGPT, anexe apenas `docs/handoff/b3-monitor-review.zip`; não anexe os arquivos do archive
 nem os handoffs individualmente, salvo se o revisor pedir.**

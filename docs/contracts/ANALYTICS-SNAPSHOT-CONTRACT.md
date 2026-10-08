@@ -146,3 +146,26 @@ following, none of which is done in this milestone and none of which touches `pr
     `producer = "projecao-carteira"` alone.
 
 **"consumer contract implemented" ≠ "projecao-carteira integration complete."**
+
+## Cycle-18 hardening (consumer correctness/integrity)
+
+- **Full-document token binding.** The preview→commit token binds BOTH the records checksum AND a
+  **full-document digest** = SHA-256 of the EXACT request bytes. An envelope-only change (producer,
+  producerVersion, generatedAt, marketAsOf, timezone, sourceId, quality) OR a whitespace-only change after
+  preview therefore invalidates the token. Idempotency/conflict is on full-document identity: same
+  snapshotId + same document ⇒ NO_OP; same snapshotId + any changed field ⇒ CONFLICT.
+- **Unambiguous token encoding.** Claims are base64url-per-field (a `|` in snapshotId/actor cannot confuse
+  the parser); a configured-but-short HMAC secret fails startup; TTL is bounded [60 s, 24 h]; expiry math is
+  overflow-safe.
+- **Strict v1 at every level.** Exact allowed-keys at envelope, record, indicators and context-metric
+  levels; duplicate context-metric names rejected; metric name nonblank; record status ∈ {OK, PARTIAL,
+  UNKNOWN}; timezone a valid IANA ZoneId or null.
+- **Numeric contract.** Validator scale ≤ 12, precision ≤ 24; storage is NUMERIC(24,12) — exact, no silent
+  rounding; an out-of-scale value is rejected before the DB.
+- **Lossless context.** FIN-02 metrics are stored in a structured child table (name/value/units/readiness/
+  quality) — every validated field round-trips; nothing is truncated.
+- **Canonical checksum fidelity.** Length-prefixed, collision-free encoding that includes record.quality and
+  context-metric quality (previously omitted). A delimiter-like string cannot collide with the framing.
+- **Per-ticker current selection.** The "current" context is chosen PER TICKER (latest valid across all
+  snapshots by marketAsOf/importedAt/id), correct for partial snapshots. No invented staleness SLA.
+- **HTTP body-size limit** enforced before body materialization; oversize ⇒ 413 with no payload echo.
