@@ -44,6 +44,17 @@ public class AnalyticsSnapshotValidator {
             "broker", "brokerid", "broker_id", "account", "accountid", "account_id", "pnl",
             "portfolio", "lots", "lot", "trades", "trade");
 
+    /** Strict v1: exactly these top-level fields are permitted; any other is rejected. */
+    private static final Set<String> ALLOWED_TOP_LEVEL = Set.of(
+            "schemaVersion", "snapshotId", "producer", "producerVersion", "generatedAt",
+            "marketAsOf", "timezone", "sourceId", "checksum", "records");
+
+    /** Max JSON nesting depth and max absolute numeric scale/precision (defensive bounds). */
+    private static final int MAX_DEPTH = 12;
+    private static final int MAX_NUM_SCALE = 12;
+    private static final int MAX_NUM_PRECISION = 24;
+    private static final java.math.BigDecimal NUM_ABS_LIMIT = new java.math.BigDecimal("1E12");
+
     /** Reject strings that look like scripts, expressions, URLs, paths or archive/executable content. */
     private static final List<String> DANGEROUS_SUBSTRINGS = List.of(
             "<script", "javascript:", "://", "file:", "\\\\", "${", "#{", "<%", "%>",
@@ -75,14 +86,25 @@ public class AnalyticsSnapshotValidator {
 
         JsonNode root;
         try {
-            root = mapper.readTree(new String(raw, StandardCharsets.UTF_8));
+            // STRICT parse: reject duplicate JSON keys (a duplicate key is ambiguous and a classic smuggling
+            // vector) and non-finite numbers (NaN/Infinity). The depth of the structure is bounded below.
+            var reader = mapper.reader()
+                    .with(tools.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION);
+            root = reader.readTree(new String(raw, StandardCharsets.UTF_8));
         } catch (Exception e) {
             return Result.fail("malformed JSON: " + safe(e.getMessage()));
         }
         if (root == null || !root.isObject()) return Result.fail("root must be a JSON object");
 
-        // Forbidden-key + dangerous-content scan over the WHOLE tree (defense in depth vs smuggling).
-        scanTree(root, errors);
+        // Depth + forbidden-key + dangerous-content + non-finite scan over the WHOLE tree (defense in depth).
+        scanTree(root, 0, errors);
+        if (!errors.isEmpty()) return Result.fail(errors);
+
+        // Strict v1: reject unknown top-level fields so a future/foreign field is never silently ignored.
+        for (var e : root.properties()) {
+            if (!ALLOWED_TOP_LEVEL.contains(e.getKey()))
+                errors.add("unknown top-level field (strict v1): " + safe(e.getKey()));
+        }
         if (!errors.isEmpty()) return Result.fail(errors);
 
         // Schema version first — unknown version fails closed before anything else is trusted.
@@ -102,6 +124,9 @@ public class AnalyticsSnapshotValidator {
         Instant generatedAt = parseInstant(root, "generatedAt", errors);
         LocalDate marketAsOf = parseDate(root, "marketAsOf", errors);
         LocalDate today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
+        Instant nowSkew = clock.instant().plusSeconds(300);   // allow 5-min clock skew, no more
+        if (generatedAt != null && generatedAt.isAfter(nowSkew))
+            errors.add("generatedAt " + generatedAt + " is in the future");
         if (marketAsOf != null && marketAsOf.isAfter(today))
             errors.add("marketAsOf " + marketAsOf + " is in the future (> " + today + ")");
 
@@ -129,6 +154,9 @@ public class AnalyticsSnapshotValidator {
             LocalDate asOf = parseDate(r, "asOf", errors);
             if (asOf != null && asOf.isAfter(today))
                 errors.add(where + ".asOf " + asOf + " is in the future");
+            if (asOf != null && marketAsOf != null && asOf.isAfter(marketAsOf))
+                errors.add(where + ".asOf " + asOf + " is after the snapshot marketAsOf " + marketAsOf
+                        + " (marketAsOf is the upper bound)");
             records.add(new AnalyticsSnapshotContract.Record(ticker, asOf, parseIndicators(r.get("indicators"), where, errors),
                     parseContext(r.get("context"), where, errors),
                     optionalBoundedText(r, "quality"), optionalBoundedText(r, "status")));
@@ -218,11 +246,17 @@ public class AnalyticsSnapshotValidator {
     private BigDecimal dec(JsonNode n, String f, String where, List<String> errors) {
         JsonNode v = n.get(f);
         if (v == null || v.isNull()) return null;
+        if (v.isNumber() && isNonFinite(v)) { errors.add(where + "." + f + " must be finite"); return null; }
         if (!v.isNumber() && !(v.isTextual() && v.asText().matches("-?\\d+(\\.\\d+)?"))) {
             errors.add(where + "." + f + " must be a number"); return null;
         }
-        try { return new BigDecimal(v.asText()); }
+        BigDecimal d;
+        try { d = new BigDecimal(v.asText()); }
         catch (NumberFormatException e) { errors.add(where + "." + f + " not a decimal"); return null; }
+        if (d.scale() > MAX_NUM_SCALE) errors.add(where + "." + f + " scale exceeds " + MAX_NUM_SCALE);
+        if (d.precision() > MAX_NUM_PRECISION) errors.add(where + "." + f + " precision exceeds " + MAX_NUM_PRECISION);
+        if (d.abs().compareTo(NUM_ABS_LIMIT) > 0) errors.add(where + "." + f + " magnitude out of range");
+        return d;
     }
 
     private MetricReadiness readiness(JsonNode n, String f, String where, List<String> errors) {
@@ -232,15 +266,19 @@ public class AnalyticsSnapshotValidator {
         catch (IllegalArgumentException e) { errors.add(where + "." + f + " invalid readiness: " + safe(v.asText())); return MetricReadiness.NOT_READY; }
     }
 
-    private void scanTree(JsonNode node, List<String> errors) {
+    private void scanTree(JsonNode node, int depth, List<String> errors) {
+        if (depth > MAX_DEPTH) { errors.add("JSON nesting exceeds max depth " + MAX_DEPTH); return; }
         if (node.isObject()) {
             for (var e : node.properties()) {
                 if (FORBIDDEN_KEYS.contains(e.getKey().toLowerCase(Locale.ROOT)))
                     errors.add("forbidden private-portfolio key present: " + e.getKey());
-                scanTree(e.getValue(), errors);
+                scanTree(e.getValue(), depth + 1, errors);
             }
         } else if (node.isArray()) {
-            node.forEach(c -> scanTree(c, errors));
+            node.forEach(c -> scanTree(c, depth + 1, errors));
+        } else if (node.isNumber()) {
+            if (isNonFinite(node))   // a non-finite number is never a valid metric (parse also rejects NaN/Inf tokens)
+                errors.add("non-finite numeric value (NaN/Infinity) is not allowed");
         } else if (node.isTextual()) {
             String s = node.asText();
             if (s.length() > AnalyticsSnapshotContract.MAX_STRING)
@@ -283,6 +321,16 @@ public class AnalyticsSnapshotValidator {
         try { return LocalDate.parse(v); } catch (Exception e) { errors.add(f + " must be ISO-8601 date"); return null; }
     }
     private static String num(BigDecimal b) { return b == null ? "" : b.stripTrailingZeros().toPlainString(); }
+
+    /** True for a non-finite floating node (NaN/±Infinity). Jackson's strict parse already rejects the
+     *  NaN/Infinity LITERAL tokens; this is defense-in-depth for a double node that somehow decoded to one. */
+    private static boolean isNonFinite(JsonNode v) {
+        if (v != null && (v.isDouble() || v.isFloat())) {
+            double d = v.doubleValue();
+            return Double.isNaN(d) || Double.isInfinite(d);
+        }
+        return false;
+    }
     private static String safe(String s) {
         if (s == null) return "null";
         String t = s.replaceAll("\\s+", " ").trim();
