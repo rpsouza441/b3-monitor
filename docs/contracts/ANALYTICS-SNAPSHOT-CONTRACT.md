@@ -96,3 +96,53 @@ Runtime verification against a REAL producer snapshot remains **NOT_VERIFIED** u
 Importing a snapshot is **context only**. It does not authorize an asset, enable a worker, trigger Brapi or
 WAHA, change a rule decision, or generate a buy/sell recommendation. Imported analytics are never read into
 a rule evaluation in v1 (FIN-04).
+
+## Preview → commit token (cycle-17 hardening)
+
+The preview step returns an **HMAC-SHA256 token** bound to the full authorization context, not merely the
+content checksum. The token's claims are `purpose | schemaVersion | snapshotId | checksum | actor |
+issuedAt | ttl`, signed with a server secret and verified with a constant-time compare. On commit the
+token is accepted only if **all** of purpose (`b3-monitor:analytics-import:v1`), schema, snapshotId,
+canonical checksum and actor match the live commit, and it has not expired (default TTL 900 s). Therefore:
+a token minted for one actor cannot be committed by another; a token for payload A cannot commit payload B
+(the checksum differs); a token for snapshot/schema A cannot commit snapshot/schema B; a tampered, expired,
+wrong-purpose or malformed token is rejected fail-closed. The token carries **no secret and no raw
+payload** — only the digest. Replay is bounded to idempotency: the same token re-presented for the same
+snapshotId+checksum yields `IDEMPOTENT_NOOP`; it can never authorize changed content.
+
+## Strict v1 parser rules (cycle-17 hardening)
+
+The consumer parses defensively, enforcing bounds before trusting content: strict **duplicate-JSON-key
+rejection**; **unknown top-level fields rejected** (strict v1 — a future/foreign field is never silently
+ignored); JSON nesting depth ≤ 12; non-finite numbers (NaN/Infinity) rejected at parse and defensively
+again; per-metric numeric **scale ≤ 12, precision ≤ 24, magnitude ≤ 1e12**; duplicate tickers in one
+snapshot rejected (no implicit merge). Temporal invariants: `generatedAt` not in the future (≤ 5-min skew),
+`marketAsOf` not after today, and each record `asOf ≤ marketAsOf` (marketAsOf is the upper bound).
+`importedAt` is always the injected server clock, never from the payload.
+
+## Current analytics context selection
+
+The "current" context per ticker is chosen from COMMITTED snapshots by **highest `marketAsOf`**, with the
+latest `importedAt` as a deterministic tie-break — never by import order alone. An older-`asOf` snapshot
+imported later therefore does NOT replace newer-`asOf` context; a rejected/conflicted preview is never
+current.
+
+## Producer acceptance checklist (future, human-gated — NOT implemented)
+
+Promoting the consumer from `CONSUMER_VERIFIED_SYNTHETIC` to real integration requires ALL of the
+following, none of which is done in this milestone and none of which touches `projecao-carteira` now:
+
+1. explicit sibling-change authorization recorded (the human gate to modify `projecao-carteira`);
+2. the exporter emits exactly schema `b3-monitor.analytics-snapshot/1`;
+3. a SHARED canonical-checksum golden test the exporter and this consumer both pass;
+4. the exporter stamps a real `producerVersion`;
+5. atomic artifact write/delivery (no partial file ever visible to the consumer);
+6. the artifact is generated from ACTUAL `projecao-carteira` data (not a synthetic fixture);
+7. b3-monitor imports that exact artifact through the ADMIN preview→commit path;
+8. documented provenance (source, as-of, version) on the imported snapshot;
+9. reconciliation of a sample of tickers against the producer's own output;
+10. no synthetic flag on the imported snapshot;
+11. runtime status is promoted to VERIFIED **only after** that evidence exists — never inferred from
+    `producer = "projecao-carteira"` alone.
+
+**"consumer contract implemented" ≠ "projecao-carteira integration complete."**
