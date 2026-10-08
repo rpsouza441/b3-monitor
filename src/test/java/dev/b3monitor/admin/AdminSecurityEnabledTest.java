@@ -332,9 +332,9 @@ class AdminSecurityEnabledTest {
                         .contentType("application/json").content(correctBody))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertTrueJson(p2.get("wouldImport"));
-        String token = p2.get("canonicalChecksum").asText();
+        String token = p2.get("token").asText();
 
-        mvc.perform(post("/api/admin/imports/commit?expectedChecksum=" + token)
+        mvc.perform(post("/api/admin/imports/commit?token=" + java.net.URLEncoder.encode(token, java.nio.charset.StandardCharsets.UTF_8))
                         .with(user("admin").roles("ADMIN")).with(csrf())
                         .contentType("application/json").content(correctBody))
                 .andExpect(status().isCreated())

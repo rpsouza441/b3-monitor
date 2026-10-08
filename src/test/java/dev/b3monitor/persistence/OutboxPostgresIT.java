@@ -271,4 +271,47 @@ class OutboxPostgresIT {
         var saved = auditRepo.saveAndFlush(ev);
         assertNotNull(saved.getId(), "V14 CHECK allows IMPORT_SNAPSHOT");
     }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    org.springframework.transaction.PlatformTransactionManager txManager;
+
+    /** Cycle-17 item 6: two threads commit the SAME snapshotId concurrently; the unique constraint must
+     *  let exactly ONE durable snapshot through and the other must fail with a data-integrity violation —
+     *  never two rows, never a swallowed unrelated error. */
+    @Test
+    void concurrentSameSnapshotCommitYieldsExactlyOneDurable() throws Exception {
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var barrier = new java.util.concurrent.CyclicBarrier(2);
+        var tt = new org.springframework.transaction.support.TransactionTemplate(txManager);
+        java.util.concurrent.Callable<String> commitOne = () -> {
+            barrier.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            try {
+                return tt.execute(s -> {
+                    var e = new AnalyticsSnapshotEntity("race-snap", "b3-monitor.analytics-snapshot/1",
+                            "projecao-carteira", "0.0.1", NOW, java.time.LocalDate.of(2026, 10, 6),
+                            "America/Sao_Paulo", "COTAHIST-RAW", "c".repeat(64), 0, NOW, "admin",
+                            "CONSUMER_VERIFIED_SYNTHETIC");
+                    analyticsSnapshots.saveAndFlush(e);
+                    return "OK";
+                });
+            } catch (org.springframework.dao.DataIntegrityViolationException dup) {
+                return "DUP";   // the EXPECTED loser outcome — unique snapshot_id
+            }
+        };
+        try {
+            var f1 = pool.submit(commitOne);
+            var f2 = pool.submit(commitOne);
+            String r1 = f1.get(20, java.util.concurrent.TimeUnit.SECONDS);
+            String r2 = f2.get(20, java.util.concurrent.TimeUnit.SECONDS);
+            // exactly one OK and one DUP (any OTHER exception propagates out of Future.get and fails the test)
+            assertTrue((r1.equals("OK") && r2.equals("DUP")) || (r1.equals("DUP") && r2.equals("OK")),
+                    "exactly one durable commit; the other hits the unique constraint — got " + r1 + "/" + r2);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(1, analyticsSnapshots.findByOrderByImportedAtDescIdDesc(
+                org.springframework.data.domain.PageRequest.of(0, 50)).stream()
+                .filter(s -> s.getSnapshotId().equals("race-snap")).count(),
+                "exactly one durable analytics_snapshot row for the raced id");
+    }
 }

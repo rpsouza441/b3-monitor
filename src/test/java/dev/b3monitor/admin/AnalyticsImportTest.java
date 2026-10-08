@@ -84,7 +84,7 @@ class AnalyticsImportTest {
         assertEquals("snap-ok-1", preview.snapshotId());
         assertEquals(1, preview.recordCount());
 
-        var commit = imports.commit(body, preview.canonicalChecksum());
+        var commit = imports.commit(body, preview.token());
         assertEquals("IMPORTED", commit.disposition());
         assertEquals("CONSUMER_VERIFIED_SYNTHETIC",
                 snapshots.findBySnapshotId("snap-ok-1").orElseThrow().getStatus(),
@@ -133,10 +133,11 @@ class AnalyticsImportTest {
     @Test
     void duplicateIdenticalImportIsIdempotent() {
         String base = validSnapshot("snap-idem", "WEGE3", "2026-10-06");
-        String canonical = canonicalFor(base);
-        byte[] body = withChecksum(base, canonical);
-        assertEquals("IMPORTED", imports.commit(body, canonical).disposition());
-        var second = imports.commit(body, canonical);
+        byte[] body = withChecksum(base, canonicalFor(base));
+        String token = tokenFor(body);
+        assertEquals("IMPORTED", imports.commit(body, token).disposition());
+        // same body re-previewed yields a fresh token for the same (schema,id,checksum,actor) → idempotent
+        var second = imports.commit(body, tokenFor(body));
         assertEquals("IDEMPOTENT_NOOP", second.disposition(), "same id + checksum is idempotent");
         assertEquals(1, snapshots.findByOrderByImportedAtDescIdDesc(
                 org.springframework.data.domain.PageRequest.of(0, 50)).stream()
@@ -145,25 +146,27 @@ class AnalyticsImportTest {
 
     @Test
     void sameIdDifferentChecksumConflict() {
-        String base = validSnapshot("snap-conflict", "WEGE3", "2026-10-06");
-        assertEquals("IMPORTED", imports.commit(withChecksum(base, canonicalFor(base)), canonicalFor(base)).disposition());
+        byte[] base = withChecksum(validSnapshot("snap-conflict", "WEGE3", "2026-10-06"),
+                canonicalFor(validSnapshot("snap-conflict", "WEGE3", "2026-10-06")));
+        assertEquals("IMPORTED", imports.commit(base, tokenFor(base)).disposition());
         // a different content (different record values) under the SAME id → conflict
-        String changed = validSnapshot("snap-conflict", "WEGE3", "2026-10-06").replace("50.10", "99.99");
-        var r = imports.commit(withChecksum(changed, canonicalFor(changed)), canonicalFor(changed));
+        String changedJson = validSnapshot("snap-conflict", "WEGE3", "2026-10-06").replace("50.10", "99.99");
+        byte[] changed = withChecksum(changedJson, canonicalFor(changedJson));
+        var r = imports.commit(changed, tokenFor(changed));
         assertEquals("REJECTED_CONFLICT", r.disposition());
     }
 
     @Test
     void previewCommitContentMismatchRejected() {
         String base = validSnapshot("snap-token", "WEGE3", "2026-10-06");
-        String canonical = canonicalFor(base);
-        byte[] previewed = withChecksum(base, canonical);
+        byte[] previewed = withChecksum(base, canonicalFor(base));
         var p = imports.preview(previewed);
         assertTrue(p.wouldImport());
-        // commit DIFFERENT content but present the OLD token → rejected
-        String changed = validSnapshot("snap-token", "WEGE3", "2026-10-06").replace("55.00", "60.00");
-        var r = imports.commit(withChecksum(changed, canonicalFor(changed)), p.canonicalChecksum());
-        assertEquals("REJECTED_TOKEN_MISMATCH", r.disposition());
+        // commit DIFFERENT content but present the OLD token → the token's checksum no longer binds → rejected
+        String changedJson = validSnapshot("snap-token", "WEGE3", "2026-10-06").replace("55.00", "60.00");
+        byte[] changed = withChecksum(changedJson, canonicalFor(changedJson));
+        var r = imports.commit(changed, p.token());
+        assertTrue(r.disposition().startsWith("REJECTED_TOKEN_"), "changed content fails token binding: " + r.disposition());
         assertTrue(snapshots.findBySnapshotId("snap-token").isEmpty(), "nothing persisted on token mismatch");
     }
 
@@ -189,6 +192,13 @@ class AnalyticsImportTest {
     @Test
     void emptyDocumentRejected() {
         assertFalse(imports.preview(new byte[0]).wouldImport());
+    }
+
+    /** Preview a correctly-checksummed body and return its HMAC commit token. */
+    private String tokenFor(byte[] body) {
+        var p = imports.preview(body);
+        org.junit.jupiter.api.Assertions.assertTrue(p.wouldImport(), "body must preview cleanly to mint a token");
+        return p.token();
     }
 
     /** Compute the canonical checksum for a base body by previewing a copy whose declared checksum is
