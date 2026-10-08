@@ -39,7 +39,7 @@
       <li>Disposition: <span th:text="${preview.disposition()}"></span></li>
     </ul>
     <form method="post" th:action="@{/admin/imports/commit}">
-      <input type="hidden" name="expectedChecksum" th:value="${preview.canonicalChecksum()}"/>
+      <input type="hidden" name="token" th:value="${previewToken}"/>
       <textarea name="snapshotJson" th:text="${previewJson}"></textarea>
       <br/><button type="submit">Commit import</button>
     </form>

@@ -41,4 +41,27 @@ public class AppConfig {
             tools.jackson.databind.ObjectMapper mapper) {
         return new dev.b3monitor.domain.analytics.AnalyticsSnapshotValidator(catalog, clock, mapper);
     }
+
+    /**
+     * HMAC secret for the analytics preview→commit token (cycle-17). In a local/offline milestone a
+     * stable per-process random secret is sufficient and safest: a token is only valid within the process
+     * that issued it (preview and commit are the same short-lived admin session), nothing durable depends
+     * on it, and no secret is committed to config. An operator MAY pin a secret via
+     * {@code b3monitor.admin.analytics.token-secret} (>= 16 chars) for multi-instance stability.
+     */
+    @Bean
+    public dev.b3monitor.admin.AnalyticsPreviewToken analyticsPreviewToken(
+            Clock clock,
+            @Value("${b3monitor.admin.analytics.token-secret:}") String configuredSecret,
+            @Value("${b3monitor.admin.analytics.token-ttl-seconds:900}") long ttlSeconds) {
+        byte[] secret;
+        if (configuredSecret != null && configuredSecret.length() >= 16) {
+            secret = configuredSecret.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        } else {
+            secret = new byte[32];
+            new java.security.SecureRandom().nextBytes(secret);   // per-process ephemeral secret
+        }
+        return new dev.b3monitor.admin.AnalyticsPreviewToken(secret, clock,
+                java.time.Duration.ofSeconds(Math.max(60, ttlSeconds)));
+    }
 }

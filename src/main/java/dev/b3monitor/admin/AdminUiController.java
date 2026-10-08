@@ -105,6 +105,7 @@ public class AdminUiController {
         ra.addFlashAttribute("preview", p);
         if (p.wouldImport()) {
             ra.addFlashAttribute("previewJson", snapshotJson);           // retained so commit resubmits exact bytes
+            ra.addFlashAttribute("previewToken", p.token());             // HMAC token bound to content+actor+schema+snapshot
             ra.addFlashAttribute("ok", "Preview OK: " + p.snapshotId() + " (" + p.recordCount()
                     + " records, checksum " + p.canonicalChecksum().substring(0, 12) + "…) — review, then commit.");
         } else {
@@ -113,18 +114,21 @@ public class AdminUiController {
         return "redirect:/admin/imports";
     }
 
-    /** Commit a previously previewed snapshot (ADMIN + CSRF). Requires the preview token to match the body. */
+    /** Commit a previously previewed snapshot (ADMIN + CSRF). Requires the HMAC preview token. */
     @PostMapping("/imports/commit")
-    public String commitImport(@RequestParam String snapshotJson, @RequestParam String expectedChecksum,
+    public String commitImport(@RequestParam String snapshotJson, @RequestParam String token,
                                RedirectAttributes ra) {
         var r = imports.commit(snapshotJson == null ? new byte[0] : snapshotJson.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                expectedChecksum);
+                token);
         switch (r.disposition()) {
             case "IMPORTED" -> ra.addFlashAttribute("ok", "Imported " + r.snapshotId() + " (" + r.recordCount() + " records).");
             case "IDEMPOTENT_NOOP" -> ra.addFlashAttribute("ok", "Already imported (idempotent): " + r.snapshotId() + ".");
             case "REJECTED_CONFLICT" -> ra.addFlashAttribute("error", "Conflict: snapshot id " + r.snapshotId() + " reused with a different checksum.");
-            case "REJECTED_TOKEN_MISMATCH" -> ra.addFlashAttribute("error", "Rejected: content changed since preview (token mismatch).");
-            default -> ra.addFlashAttribute("error", "Rejected: validation failed.");
+            default -> {
+                if (r.disposition().startsWith("REJECTED_TOKEN_"))
+                    ra.addFlashAttribute("error", "Rejected: preview token invalid (" + r.disposition().substring("REJECTED_TOKEN_".length()) + ").");
+                else ra.addFlashAttribute("error", "Rejected: validation failed.");
+            }
         }
         return "redirect:/admin/imports";
     }

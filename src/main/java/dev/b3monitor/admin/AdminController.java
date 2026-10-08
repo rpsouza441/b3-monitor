@@ -101,17 +101,17 @@ public class AdminController {
         return imports.preview(body == null ? new byte[0] : body);
     }
 
-    /** Re-validate + persist. Requires the preview token (expectedChecksum) to match the resubmitted content. */
+    /** Re-validate + persist. Requires the preview token (HMAC-bound to content+actor+schema+snapshot). */
     @PostMapping(value = "/imports/commit", consumes = "application/json")
     public ResponseEntity<AnalyticsImportService.CommitResult> commitImport(
             @RequestBody(required = false) byte[] body,
-            @RequestParam(name = "expectedChecksum", required = false) String expectedChecksum) {
-        var result = imports.commit(body == null ? new byte[0] : body, expectedChecksum);
+            @RequestParam(name = "token", required = false) String token) {
+        var result = imports.commit(body == null ? new byte[0] : body, token);
         HttpStatus status = switch (result.disposition()) {
             case "IMPORTED" -> HttpStatus.CREATED;
             case "IDEMPOTENT_NOOP" -> HttpStatus.OK;
             case "REJECTED_CONFLICT" -> HttpStatus.CONFLICT;
-            default -> HttpStatus.BAD_REQUEST;   // REJECTED_VALIDATION / REJECTED_TOKEN_MISMATCH
+            default -> HttpStatus.BAD_REQUEST;   // REJECTED_VALIDATION / REJECTED_TOKEN_*
         };
         return ResponseEntity.status(status).body(result);
     }
