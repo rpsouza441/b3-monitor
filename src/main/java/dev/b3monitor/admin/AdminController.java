@@ -193,4 +193,11 @@ public class AdminController {
     private static ResponseStatusException badRequest(String m) { return new ResponseStatusException(HttpStatus.BAD_REQUEST, m); }
     private static ResponseStatusException notFound(String m)   { return new ResponseStatusException(HttpStatus.NOT_FOUND, m); }
     private static ResponseStatusException conflict(String m)   { return new ResponseStatusException(HttpStatus.CONFLICT, m); }
+
+    /** Oversize chunked analytics body (item J) → 413, no payload echo. */
+    @ExceptionHandler(AnalyticsImportSizeLimitFilter.BodyTooLargeException.class)
+    @ResponseStatus(HttpStatus.PAYLOAD_TOO_LARGE)
+    public MessageResponse tooLarge(AnalyticsImportSizeLimitFilter.BodyTooLargeException e) {
+        return new MessageResponse("analytics snapshot too large");
+    }
 }

@@ -88,7 +88,7 @@ public final class AdminDtos {
     public record AnalyticsContextView(String ticker, boolean present,
                                        String snapshotId, String producer, String producerVersion,
                                        String schemaVersion, String analyticsAsOf, Instant importedAt,
-                                       Long analyticsAgeSeconds, boolean analyticsStale,
+                                       Long analyticsAgeSeconds, String stalePolicy,
                                        BigDecimal sma20, String sma20Readiness,
                                        BigDecimal sma50, String sma50Readiness,
                                        BigDecimal rsi14, String rsi14Readiness,

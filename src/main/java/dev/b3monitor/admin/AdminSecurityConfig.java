@@ -106,6 +106,17 @@ public class AdminSecurityConfig {
         return new org.springframework.boot.web.servlet.ServletListenerRegistrationBean<>(listener);
     }
 
+    /** Cycle-18 item J: register the analytics import body-size-limit filter (admin-enabled only). */
+    @Bean
+    @ConditionalOnProperty(name = "b3monitor.admin.enabled", havingValue = "true")
+    public org.springframework.boot.web.servlet.FilterRegistrationBean<AnalyticsImportSizeLimitFilter>
+            analyticsImportSizeLimitFilter() {
+        var reg = new org.springframework.boot.web.servlet.FilterRegistrationBean<>(new AnalyticsImportSizeLimitFilter());
+        reg.addUrlPatterns("/api/admin/imports/*", "/admin/imports/*");
+        reg.setOrder(org.springframework.core.Ordered.HIGHEST_PRECEDENCE);
+        return reg;
+    }
+
     /** Fails context startup unless the configured bind address is a loopback literal. */
     static final class LoopbackBindValidator {
         LoopbackBindValidator(String bindAddress) {

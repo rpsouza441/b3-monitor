@@ -39,8 +39,8 @@
       <td><span th:if="${r.present()}" th:text="${r.producer()} + ' ' + ${r.producerVersion()}"></span><span th:unless="${r.present()}">&mdash;</span></td>
       <td th:text="${r.present()} ? ${r.schemaVersion()} : '—'"></td>
       <td th:text="${r.present()} ? ${r.snapshotId()} : '—'"></td>
-      <td><span th:class="${r.analyticsStale()} ? 'stale' : ''" th:text="${r.present()} ? ${r.analyticsAsOf()} : '—'"></span>
-          <span th:if="${r.analyticsStale()}" class="stale"> (stale)</span></td>
+      <td><span th:text="${r.present()} ? ${r.analyticsAsOf()} : '—'"></span>
+          <span th:text="'· age ' + ${r.analyticsAgeSeconds()} + 's · ' + ${r.stalePolicy()}" style="color:#777"></span></td>
       <td th:text="${r.importedAt()}"></td>
       <td th:text="${r.analyticsAgeSeconds()}"></td>
       <td th:text="${r.sma20()} + ' / ' + ${r.sma20Readiness()}"></td>

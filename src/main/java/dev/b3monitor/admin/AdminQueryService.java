@@ -198,45 +198,51 @@ public class AdminQueryService {
 
     /**
      * UI-01 (cycle-16): per-asset ANALYTICS CONTEXT from the latest imported snapshot — SEPARATE from quote
-     * freshness. One row per catalog asset: when the latest snapshot has a row for the asset it is shown with
-     * producer/version/schema/as-of/import-time/age + typed indicators (each with its own readiness) + FIN-02
-     * context; otherwise {@code present=false} (explicit no-data). Analytics staleness is judged against the
-     * configured max analytics age — distinct from quote staleness. CONTEXT only (FIN-04): never a rule input.
-     * When NO snapshot has ever been imported, every row is {@code integrationStatus=NOT_INTEGRATED}.
+     * freshness. Cycle-18 item D: for EACH catalog asset the LATEST valid context is selected across ALL
+     * committed snapshots (snapshot.marketAsOf DESC, importedAt DESC, id DESC, context.id DESC) — correct for
+     * PARTIAL snapshots, where an older snapshot's ticker stays current when a newer snapshot omits it.
+     * {@code present=false} ⇒ no context for this asset (explicit no-data). Analytics AGE is shown; there is
+     * no invented staleness SLA (item E) — {@code stalePolicy=POLICY_NOT_CONFIGURED}. CONTEXT only (FIN-04).
      */
     @Transactional(readOnly = true)
     public AnalyticsContextListView analyticsContext() {
-        var latest = snapshots.findFirstByOrderByMarketAsOfDescImportedAtDesc();
-        long maxAgeSeconds = 2L * 24 * 3600;   // analytics older than ~2 days is flagged stale (daily cadence)
+        boolean anyImported = snapshots.count() > 0;
+        var one = org.springframework.data.domain.PageRequest.of(0, 1);
         List<AnalyticsContextView> rows = catalog.tickers().stream().map(ticker -> {
-            if (latest.isEmpty()) {
-                return new AnalyticsContextView(ticker, false, null, null, null, null, null, null, null, false,
-                        null, null, null, null, null, null, null, null, null, null, null, null,
-                        null, null, null, "NOT_INTEGRATED");
-            }
-            var snap = latest.get();
-            var match = analyticsRows.findBySnapshot_IdAndTicker(snap.getId(), ticker);
+            var match = analyticsRows.findLatestForTicker(ticker, one);
             if (match.isEmpty()) {
-                return new AnalyticsContextView(ticker, false, snap.getSnapshotId(), snap.getProducer(),
-                        snap.getProducerVersion(), snap.getSchemaVersion(), String.valueOf(snap.getMarketAsOf()),
-                        snap.getImportedAt(), null, false,
+                String integ = anyImported ? "ANALYTICS_MISSING" : "NOT_INTEGRATED";
+                return new AnalyticsContextView(ticker, false, null, null, null, null, null, null, null,
+                        "POLICY_NOT_CONFIGURED",
                         null, null, null, null, null, null, null, null, null, null, null, null,
-                        null, null, "ANALYTICS_MISSING", "CONSUMER_VERIFIED_SYNTHETIC");
+                        null, null, null, integ);
             }
             var r = match.get(0);
+            var snap = r.getSnapshot();
             Long age = snap.getMarketAsOf() == null ? null
                     : Duration.between(snap.getMarketAsOf().atStartOfDay(java.time.ZoneOffset.UTC).toInstant(),
                               clock.instant()).getSeconds();
-            boolean stale = age != null && age > maxAgeSeconds;
             return new AnalyticsContextView(ticker, true, snap.getSnapshotId(), snap.getProducer(),
                     snap.getProducerVersion(), snap.getSchemaVersion(), String.valueOf(snap.getMarketAsOf()),
-                    snap.getImportedAt(), age, stale,
+                    snap.getImportedAt(), age, "POLICY_NOT_CONFIGURED",
                     r.getSma20(), r.getSma20Readiness(), r.getSma50(), r.getSma50Readiness(),
                     r.getRsi14(), r.getRsi14Readiness(), r.getEma9(), r.getEma9Readiness(),
                     r.getEma21(), r.getEma21Readiness(), r.getVolumeRatio(), r.getVolumeRatioReadiness(),
-                    r.getContextMetrics(), r.getQuality(), r.getStatus(), "CONSUMER_VERIFIED_SYNTHETIC");
+                    renderMetrics(r.getMetrics()), r.getQuality(), r.getStatus(), "CONSUMER_VERIFIED_SYNTHETIC");
         }).toList();
         return new AnalyticsContextListView(rows);
+    }
+
+    /** Render the structured FIN-02 context metrics for display (name=value units [readiness] (quality)). */
+    private static String renderMetrics(java.util.List<dev.b3monitor.persistence.AnalyticsContextMetricEntity> ms) {
+        if (ms == null || ms.isEmpty()) return "-";
+        return ms.stream()
+                .sorted(java.util.Comparator.comparing(m -> m.getName() == null ? "" : m.getName()))
+                .map(m -> m.getName() + "=" + (m.getValue() == null ? "" : m.getValue().toPlainString())
+                        + (m.getUnits() == null ? "" : " " + m.getUnits())
+                        + " [" + m.getReadiness() + "]"
+                        + (m.getQuality() == null ? "" : " (" + m.getQuality() + ")"))
+                .collect(java.util.stream.Collectors.joining("; "));
     }
 
     /**
