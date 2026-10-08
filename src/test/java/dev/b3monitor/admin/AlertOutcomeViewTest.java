@@ -37,9 +37,46 @@ class AlertOutcomeViewTest {
     @Autowired dev.b3monitor.persistence.OutboxAttemptRepository attempts;
 
     private OutboxEntity row(String key, OutboxState state) {
-        var e = new OutboxEntity(key, "r-" + key, "WEGE3", "msg", 1L, 1L, NOW.minusSeconds(60), NOW, null);
+        return rowAt(key, state, NOW.minusSeconds(60));
+    }
+
+    private OutboxEntity rowAt(String key, OutboxState state, Instant intentCreatedAt) {
+        // ctor: (logicalKey, ruleId, ticker, message, ruleRevision, episodeEpoch, sourceAsOf, intentCreatedAt, expiresAt)
+        var e = new OutboxEntity(key, "r-" + key, "WEGE3", "msg", 1L, 1L, NOW.minusSeconds(60), intentCreatedAt, null);
         e.setState(state);
         return e;
+    }
+
+    /** Cycle-14 B — the view is ordered by the LOGICAL event clock (intentCreatedAt DESC), not insertion
+     *  order. Insert rows so that id-order and intentCreatedAt-order DISAGREE, then prove newest-first
+     *  reflects intentCreatedAt (with id as the deterministic tie-break). */
+    @Test
+    void orderingIsSemanticNewestFirstByIntentCreatedAt() {
+        outbox.deleteAll(); attempts.deleteAll();
+        // Insert in an order DIFFERENT from intentCreatedAt: oldest-logical is inserted FIRST (lowest id),
+        // newest-logical LAST — but we also insert a middle one out of sequence to break any id-correlation.
+        outbox.save(rowAt("ord-oldest", OutboxState.PENDING, NOW.minusSeconds(300)));   // id 1, logical oldest
+        outbox.save(rowAt("ord-newest", OutboxState.PENDING, NOW.minusSeconds(10)));    // id 2, logical newest
+        outbox.save(rowAt("ord-middle", OutboxState.PENDING, NOW.minusSeconds(150)));   // id 3, logical middle
+
+        var keys = query.alertOutcomes(50).alerts().stream()
+                .map(AdminDtos.AlertOutcomeView::logicalKey).toList();
+        assertEquals(java.util.List.of("ord-newest", "ord-middle", "ord-oldest"), keys,
+                "newest-first must follow intentCreatedAt DESC, not insertion/id order");
+    }
+
+    /** Cycle-14 B — id is the deterministic tie-break when intentCreatedAt is identical. */
+    @Test
+    void orderingTieBreaksOnIdDescWhenIntentCreatedAtEqual() {
+        outbox.deleteAll(); attempts.deleteAll();
+        Instant same = NOW.minusSeconds(42);
+        long id1 = outbox.save(rowAt("tie-a", OutboxState.PENDING, same)).getId();
+        long id2 = outbox.save(rowAt("tie-b", OutboxState.PENDING, same)).getId();
+        assertTrue(id2 > id1);
+        var keys = query.alertOutcomes(50).alerts().stream()
+                .map(AdminDtos.AlertOutcomeView::logicalKey).toList();
+        assertEquals(java.util.List.of("tie-b", "tie-a"), keys,
+                "equal intentCreatedAt → higher id first (deterministic tie-break)");
     }
 
     @Test

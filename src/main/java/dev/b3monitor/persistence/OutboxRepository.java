@@ -79,13 +79,15 @@ public interface OutboxRepository extends JpaRepository<OutboxEntity, Long> {
     List<OutboxEntity> findNeedingReconciliation(org.springframework.data.domain.Pageable pageable);
 
     /**
-     * Cycle-13 P1-A: a BOUNDED, deterministic newest-first page of RECENT logical alerts across ALL
-     * transport states (PENDING/IN_FLIGHT/SENDING/ACCEPTED/UNKNOWN_OUTCOME/FAILED/CANCELLED/EXPIRED/
-     * SUPPRESSED) for the UI-03 lifecycle view. Ordered by id DESC (stable monotonic tie-break). The
-     * caller passes a hard-capped {@link org.springframework.data.domain.Pageable}; this is NOT a resend
-     * list and is distinct from the reconciliation (dead-letter) query.
+     * Cycle-13 P1-A / cycle-14 B: a BOUNDED, SEMANTIC newest-first page of RECENT logical alerts across
+     * ALL transport states (PENDING/IN_FLIGHT/SENDING/ACCEPTED/UNKNOWN_OUTCOME/FAILED/CANCELLED/EXPIRED/
+     * SUPPRESSED) for the UI-03 lifecycle view. Ordered by {@code intentCreatedAt DESC} (the logical
+     * event clock) with {@code id DESC} as the deterministic tie-break, so newest-first reflects when the
+     * alert was LOGICALLY created, not merely insertion order. The caller passes a hard-capped
+     * {@link org.springframework.data.domain.Pageable}; this is NOT a resend list and is distinct from
+     * the reconciliation (dead-letter) query.
      */
-    @Query("select o from OutboxEntity o order by o.id desc")
+    @Query("select o from OutboxEntity o order by o.intentCreatedAt desc, o.id desc")
     List<OutboxEntity> findRecentAlerts(org.springframework.data.domain.Pageable pageable);
 
     /** Unsent (PENDING) rows for a rule whose {@code ruleRevision} is strictly below {@code newRevision}
