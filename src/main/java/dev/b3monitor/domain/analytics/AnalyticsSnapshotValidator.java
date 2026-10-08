@@ -49,6 +49,17 @@ public class AnalyticsSnapshotValidator {
             "schemaVersion", "snapshotId", "producer", "producerVersion", "generatedAt",
             "marketAsOf", "timezone", "sourceId", "checksum", "records");
 
+    /** Strict v1: exact allowed keys at each nested level (cycle-18 item H). */
+    private static final Set<String> ALLOWED_RECORD = Set.of(
+            "ticker", "asOf", "indicators", "context", "quality", "status");
+    private static final Set<String> ALLOWED_INDICATORS = Set.of(
+            "sma20", "sma20Readiness", "sma50", "sma50Readiness", "rsi14", "rsi14Readiness",
+            "ema9", "ema9Readiness", "ema21", "ema21Readiness", "volumeRatio", "volumeRatioReadiness");
+    private static final Set<String> ALLOWED_CONTEXT_METRIC = Set.of(
+            "name", "value", "units", "readiness", "quality");
+    /** Documented record status vocabulary. */
+    private static final Set<String> ALLOWED_STATUS = Set.of("OK", "PARTIAL", "UNKNOWN");
+
     /** Max JSON nesting depth and max absolute numeric scale/precision (defensive bounds). */
     private static final int MAX_DEPTH = 12;
     private static final int MAX_NUM_SCALE = 12;
@@ -116,6 +127,10 @@ public class AnalyticsSnapshotValidator {
         String producer = requireBoundedString(root, "producer", errors);
         String producerVersion = requireBoundedString(root, "producerVersion", errors);
         String timezone = optionalBoundedString(root, "timezone", errors);
+        if (timezone != null && !timezone.isBlank()) {
+            try { java.time.ZoneId.of(timezone); }
+            catch (Exception e) { errors.add("timezone must be a valid IANA ZoneId or null: " + safe(timezone)); }
+        }
         String sourceId = optionalBoundedString(root, "sourceId", errors);
         String declaredChecksum = requireBoundedString(root, "checksum", errors);
         if (declaredChecksum != null && !declaredChecksum.matches("[0-9a-f]{" + AnalyticsSnapshotContract.CHECKSUM_HEX_LEN + "}"))
@@ -146,6 +161,9 @@ public class AnalyticsSnapshotValidator {
             JsonNode r = recs.get(i);
             String where = "records[" + i + "]";
             if (!r.isObject()) { errors.add(where + " must be an object"); continue; }
+            for (var e : r.properties())
+                if (!ALLOWED_RECORD.contains(e.getKey()))
+                    errors.add(where + " unknown field (strict v1): " + safe(e.getKey()));
             String ticker = text(r, "ticker");
             if (ticker == null || !tickers.contains(ticker))
                 errors.add(where + ".ticker not in trusted catalog: " + safe(ticker));
@@ -157,9 +175,12 @@ public class AnalyticsSnapshotValidator {
             if (asOf != null && marketAsOf != null && asOf.isAfter(marketAsOf))
                 errors.add(where + ".asOf " + asOf + " is after the snapshot marketAsOf " + marketAsOf
                         + " (marketAsOf is the upper bound)");
+            String recStatus = optionalBoundedText(r, "status");
+            if (recStatus != null && !recStatus.isBlank() && !ALLOWED_STATUS.contains(recStatus))
+                errors.add(where + ".status must be one of " + ALLOWED_STATUS + " (got " + safe(recStatus) + ")");
             records.add(new AnalyticsSnapshotContract.Record(ticker, asOf, parseIndicators(r.get("indicators"), where, errors),
                     parseContext(r.get("context"), where, errors),
-                    optionalBoundedText(r, "quality"), optionalBoundedText(r, "status")));
+                    optionalBoundedText(r, "quality"), recStatus));
         }
         if (!errors.isEmpty()) return Result.fail(errors);
 
@@ -173,36 +194,54 @@ public class AnalyticsSnapshotValidator {
         return Result.ok(snap, canonical);
     }
 
-    /** SHA-256 (lowercase hex) over a stable canonical encoding of the records. Public so the importer can
-     *  recompute it to bind a preview token and enforce idempotency / conflict detection. */
+    /** SHA-256 (lowercase hex) over a stable, UNAMBIGUOUS canonical encoding of the records. Every
+     *  semantic field is included (incl. record.quality and context-metric quality), and every value is
+     *  LENGTH-PREFIXED (len:bytes) so no delimiter-like string can collide with the structure. Records are
+     *  ticker-sorted; context metrics name-sorted. Public so the importer can recompute it for the
+     *  producer-facing records checksum. (cycle-18 item I: fidelity + delimiter-collision fix.) */
     public String canonicalChecksum(List<AnalyticsSnapshotContract.Record> records) {
         StringBuilder sb = new StringBuilder();
         List<AnalyticsSnapshotContract.Record> sorted = new ArrayList<>(records);
         sorted.sort(Comparator.comparing(AnalyticsSnapshotContract.Record::ticker, Comparator.nullsLast(Comparator.naturalOrder())));
+        lp(sb, "records");
+        lp(sb, Integer.toString(sorted.size()));
         for (AnalyticsSnapshotContract.Record r : sorted) {
-            sb.append(r.ticker()).append('|').append(r.asOf()).append('|');
+            lp(sb, r.ticker());
+            lp(sb, r.asOf() == null ? "" : r.asOf().toString());
             IndicatorSet s = r.indicators();
+            lp(sb, s == null ? "" : "ind");
             if (s != null) {
-                sb.append(num(s.sma20())).append(',').append(s.sma20Readiness()).append(';')
-                  .append(num(s.sma50())).append(',').append(s.sma50Readiness()).append(';')
-                  .append(num(s.rsi14())).append(',').append(s.rsi14Readiness()).append(';')
-                  .append(num(s.ema9())).append(',').append(s.ema9Readiness()).append(';')
-                  .append(num(s.ema21())).append(',').append(s.ema21Readiness()).append(';')
-                  .append(num(s.volumeRatio())).append(',').append(s.volumeRatioReadiness());
+                lpNum(sb, s.sma20()); lp(sb, rn(s.sma20Readiness()));
+                lpNum(sb, s.sma50()); lp(sb, rn(s.sma50Readiness()));
+                lpNum(sb, s.rsi14()); lp(sb, rn(s.rsi14Readiness()));
+                lpNum(sb, s.ema9());  lp(sb, rn(s.ema9Readiness()));
+                lpNum(sb, s.ema21()); lp(sb, rn(s.ema21Readiness()));
+                lpNum(sb, s.volumeRatio()); lp(sb, rn(s.volumeRatioReadiness()));
             }
-            sb.append('|');
-            if (r.context() != null) {
-                List<ContextMetric> cs = new ArrayList<>(r.context());
-                cs.sort(Comparator.comparing(ContextMetric::name, Comparator.nullsLast(Comparator.naturalOrder())));
-                for (ContextMetric c : cs) {
-                    sb.append(c.name()).append('=').append(num(c.value())).append(':')
-                      .append(c.units()).append(':').append(c.readiness()).append('#');
-                }
+            List<ContextMetric> cs = r.context() == null ? List.of() : new ArrayList<>(r.context());
+            cs.sort(Comparator.comparing(ContextMetric::name, Comparator.nullsLast(Comparator.naturalOrder())));
+            lp(sb, Integer.toString(cs.size()));
+            for (ContextMetric c : cs) {
+                lp(sb, nz(c.name()));
+                lpNum(sb, c.value());
+                lp(sb, nz(c.units()));
+                lp(sb, c.readiness() == null ? "" : c.readiness().name());
+                lp(sb, nz(c.quality()));           // cycle-18 fidelity fix: context quality IS in the digest
             }
-            sb.append(r.status()).append('\n');
+            lp(sb, nz(r.quality()));                // cycle-18 fidelity fix: record quality IS in the digest
+            lp(sb, nz(r.status()));
         }
         return sha256Hex(sb.toString().getBytes(StandardCharsets.UTF_8));
     }
+
+    /** length-prefixed append: "<utf8-byte-len>:<value>" — unambiguous, collision-free framing. */
+    private static void lp(StringBuilder sb, String v) {
+        String s = v == null ? "" : v;
+        sb.append(s.getBytes(StandardCharsets.UTF_8).length).append(':').append(s).append('\n');
+    }
+    private static void lpNum(StringBuilder sb, BigDecimal b) { lp(sb, b == null ? "" : b.stripTrailingZeros().toPlainString()); }
+    private static String rn(MetricReadiness r) { return r == null ? "" : r.name(); }
+    private static String nz(String s) { return s == null ? "" : s; }
 
     public static String sha256Hex(byte[] bytes) {
         try {
@@ -220,6 +259,9 @@ public class AnalyticsSnapshotValidator {
     private IndicatorSet parseIndicators(JsonNode n, String where, List<String> errors) {
         if (n == null || n.isNull()) return null;
         if (!n.isObject()) { errors.add(where + ".indicators must be an object"); return null; }
+        for (var e : n.properties())
+            if (!ALLOWED_INDICATORS.contains(e.getKey()))
+                errors.add(where + ".indicators unknown field (strict v1): " + safe(e.getKey()));
         return new IndicatorSet(
                 dec(n, "sma20", where, errors), readiness(n, "sma20Readiness", where, errors),
                 dec(n, "sma50", where, errors), readiness(n, "sma50Readiness", where, errors),
@@ -233,12 +275,20 @@ public class AnalyticsSnapshotValidator {
         if (n == null || n.isNull()) return List.of();
         if (!n.isArray()) { errors.add(where + ".context must be an array"); return List.of(); }
         List<ContextMetric> out = new ArrayList<>();
+        Set<String> seenNames = new HashSet<>();
         for (int i = 0; i < n.size(); i++) {
             JsonNode c = n.get(i);
-            if (!c.isObject()) { errors.add(where + ".context[" + i + "] must be an object"); continue; }
-            out.add(new ContextMetric(bounded(text(c, "name"), where + ".context.name", errors),
-                    dec(c, "value", where, errors), bounded(text(c, "units"), where + ".context.units", errors),
-                    readiness(c, "readiness", where, errors), bounded(text(c, "quality"), where + ".context.quality", errors)));
+            String cw = where + ".context[" + i + "]";
+            if (!c.isObject()) { errors.add(cw + " must be an object"); continue; }
+            for (var e : c.properties())
+                if (!ALLOWED_CONTEXT_METRIC.contains(e.getKey()))
+                    errors.add(cw + " unknown field (strict v1): " + safe(e.getKey()));
+            String name = text(c, "name");
+            if (name == null || name.isBlank()) errors.add(cw + ".name must be nonblank");
+            else if (!seenNames.add(name)) errors.add(cw + ".name duplicated in context: " + safe(name));
+            out.add(new ContextMetric(bounded(name, cw + ".name", errors),
+                    dec(c, "value", where, errors), bounded(text(c, "units"), cw + ".units", errors),
+                    readiness(c, "readiness", where, errors), bounded(text(c, "quality"), cw + ".quality", errors)));
         }
         return out;
     }
