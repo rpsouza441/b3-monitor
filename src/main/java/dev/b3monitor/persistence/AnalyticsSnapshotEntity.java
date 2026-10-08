@@ -49,6 +49,11 @@ public class AnalyticsSnapshotEntity {
     @Column(name = "checksum", nullable = false, length = 64)
     private String checksum;
 
+    /** SHA-256 of the EXACT imported bytes (cycle-18 item A/B). Nullable — legacy V14 rows never stored the
+     *  raw bytes, so they keep NULL ("unknown"), never a fabricated digest. */
+    @Column(name = "document_digest", length = 64)
+    private String documentDigest;
+
     @Column(name = "record_count", nullable = false)
     private int recordCount;
 
@@ -68,8 +73,8 @@ public class AnalyticsSnapshotEntity {
 
     public AnalyticsSnapshotEntity(String snapshotId, String schemaVersion, String producer,
                                    String producerVersion, Instant generatedAt, LocalDate marketAsOf,
-                                   String timezone, String sourceId, String checksum, int recordCount,
-                                   Instant importedAt, String importedBy, String status) {
+                                   String timezone, String sourceId, String checksum, String documentDigest,
+                                   int recordCount, Instant importedAt, String importedBy, String status) {
         this.snapshotId = snapshotId;
         this.schemaVersion = schemaVersion;
         this.producer = producer;
@@ -79,6 +84,7 @@ public class AnalyticsSnapshotEntity {
         this.timezone = timezone;
         this.sourceId = sourceId;
         this.checksum = checksum;
+        this.documentDigest = documentDigest;
         this.recordCount = recordCount;
         this.importedAt = importedAt;
         this.importedBy = importedBy;
@@ -97,6 +103,7 @@ public class AnalyticsSnapshotEntity {
     public String getTimezone() { return timezone; }
     public String getSourceId() { return sourceId; }
     public String getChecksum() { return checksum; }
+    public String getDocumentDigest() { return documentDigest; }
     public int getRecordCount() { return recordCount; }
     public Instant getImportedAt() { return importedAt; }
     public String getImportedBy() { return importedBy; }

@@ -45,24 +45,31 @@ public class AnalyticsPreviewToken {
     }
 
     public record Claims(String purpose, String schemaVersion, String snapshotId, String checksum,
-                         String actor, long issuedAtMillis, long ttlSeconds) {
+                         String documentDigest, String actor, long issuedAtMillis, long ttlSeconds) {
+        /** Unambiguous canonical form: each string claim base64url-encoded, so a value containing the
+         *  separator ('|') can never confuse the parser (cycle-18 item C). Binds BOTH the records checksum
+         *  AND the full-document digest (cycle-18 item A). */
         String canonical() {
-            return purpose + "|" + schemaVersion + "|" + snapshotId + "|" + checksum + "|" + actor
-                    + "|" + issuedAtMillis + "|" + ttlSeconds;
+            return b64(purpose) + "|" + b64(schemaVersion) + "|" + b64(snapshotId) + "|" + b64(checksum)
+                    + "|" + b64(documentDigest) + "|" + b64(actor) + "|" + issuedAtMillis + "|" + ttlSeconds;
+        }
+        private static String b64(String s) {
+            return Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString((s == null ? "" : s).getBytes(StandardCharsets.UTF_8));
         }
     }
 
     public enum Rejection { OK, MALFORMED, BAD_SIGNATURE, EXPIRED, WRONG_PURPOSE,
-                            SCHEMA_MISMATCH, SNAPSHOT_MISMATCH, CONTENT_MISMATCH, ACTOR_MISMATCH }
+                            SCHEMA_MISMATCH, SNAPSHOT_MISMATCH, CONTENT_MISMATCH, DOCUMENT_MISMATCH, ACTOR_MISMATCH }
 
     public record Verification(boolean valid, Rejection rejection) {
         static Verification ok() { return new Verification(true, Rejection.OK); }
         static Verification no(Rejection r) { return new Verification(false, r); }
     }
 
-    /** Mint a token for the preview's exact authorization context. */
-    public String issue(String schemaVersion, String snapshotId, String checksum, String actor) {
-        Claims c = new Claims(PURPOSE, schemaVersion, snapshotId, checksum, actor,
+    /** Mint a token for the preview's exact authorization context (records checksum + full-document digest). */
+    public String issue(String schemaVersion, String snapshotId, String checksum, String documentDigest, String actor) {
+        Claims c = new Claims(PURPOSE, schemaVersion, snapshotId, checksum, documentDigest, actor,
                 clock.instant().toEpochMilli(), ttl.getSeconds());
         byte[] claimBytes = c.canonical().getBytes(StandardCharsets.UTF_8);
         String claimB64 = b64(claimBytes);
@@ -71,7 +78,8 @@ public class AnalyticsPreviewToken {
     }
 
     /** Verify a token against the LIVE commit context (constant-time MAC + full claim re-binding). */
-    public Verification verify(String token, String schemaVersion, String snapshotId, String checksum, String actor) {
+    public Verification verify(String token, String schemaVersion, String snapshotId, String checksum,
+                               String documentDigest, String actor) {
         if (token == null) return Verification.no(Rejection.MALFORMED);
         int dot = token.indexOf('.');
         if (dot <= 0 || dot == token.length() - 1) return Verification.no(Rejection.MALFORMED);
@@ -91,13 +99,26 @@ public class AnalyticsPreviewToken {
         if (!PURPOSE.equals(c.purpose())) return Verification.no(Rejection.WRONG_PURPOSE);
 
         long now = clock.instant().toEpochMilli();
-        long expiry = c.issuedAtMillis() + c.ttlSeconds() * 1000L;
+        // Overflow-safe expiry: ttlSeconds*1000 + issuedAt computed in a way that cannot wrap to a negative.
+        long ttlMillis;
+        try {
+            ttlMillis = Math.multiplyExact(c.ttlSeconds(), 1000L);
+        } catch (ArithmeticException overflow) {
+            return Verification.no(Rejection.EXPIRED);   // absurd TTL — treat as invalid
+        }
+        long expiry;
+        try {
+            expiry = Math.addExact(c.issuedAtMillis(), ttlMillis);
+        } catch (ArithmeticException overflow) {
+            return Verification.no(Rejection.EXPIRED);
+        }
         if (now > expiry || now < c.issuedAtMillis() - 60_000L)   // expired, or issued "in the future" (clock abuse)
             return Verification.no(Rejection.EXPIRED);
 
         if (!safeEq(c.schemaVersion(), schemaVersion)) return Verification.no(Rejection.SCHEMA_MISMATCH);
         if (!safeEq(c.snapshotId(), snapshotId))       return Verification.no(Rejection.SNAPSHOT_MISMATCH);
         if (!safeEq(c.checksum(), checksum))           return Verification.no(Rejection.CONTENT_MISMATCH);
+        if (!safeEq(c.documentDigest(), documentDigest)) return Verification.no(Rejection.DOCUMENT_MISMATCH);
         if (!safeEq(c.actor(), actor))                 return Verification.no(Rejection.ACTOR_MISMATCH);
         return Verification.ok();
     }
@@ -114,10 +135,18 @@ public class AnalyticsPreviewToken {
 
     private static Claims parse(String s) {
         String[] p = s.split("\\|", -1);
-        if (p.length != 7) return null;
+        if (p.length != 8) return null;
         try {
-            return new Claims(p[0], p[1], p[2], p[3], p[4], Long.parseLong(p[5]), Long.parseLong(p[6]));
-        } catch (NumberFormatException e) {
+            var dec = Base64.getUrlDecoder();
+            String purpose = new String(dec.decode(p[0]), StandardCharsets.UTF_8);
+            String schema = new String(dec.decode(p[1]), StandardCharsets.UTF_8);
+            String snapshotId = new String(dec.decode(p[2]), StandardCharsets.UTF_8);
+            String checksum = new String(dec.decode(p[3]), StandardCharsets.UTF_8);
+            String documentDigest = new String(dec.decode(p[4]), StandardCharsets.UTF_8);
+            String actor = new String(dec.decode(p[5]), StandardCharsets.UTF_8);
+            return new Claims(purpose, schema, snapshotId, checksum, documentDigest, actor,
+                    Long.parseLong(p[6]), Long.parseLong(p[7]));
+        } catch (IllegalArgumentException e) {
             return null;
         }
     }

@@ -55,13 +55,21 @@ public class AppConfig {
             @Value("${b3monitor.admin.analytics.token-secret:}") String configuredSecret,
             @Value("${b3monitor.admin.analytics.token-ttl-seconds:900}") long ttlSeconds) {
         byte[] secret;
-        if (configuredSecret != null && configuredSecret.length() >= 16) {
+        if (configuredSecret != null && !configuredSecret.isBlank()) {
+            // A configured secret that is present but too short is a MISCONFIGURATION — fail startup,
+            // never silently fall back to a random secret (cycle-18 item C).
+            if (configuredSecret.length() < 16) {
+                throw new IllegalStateException(
+                        "b3monitor.admin.analytics.token-secret is set but shorter than 16 characters — "
+                                + "failing startup rather than falling back to a random secret.");
+            }
             secret = configuredSecret.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         } else {
             secret = new byte[32];
-            new java.security.SecureRandom().nextBytes(secret);   // per-process ephemeral secret
+            new java.security.SecureRandom().nextBytes(secret);   // per-process ephemeral secret (unset)
         }
-        return new dev.b3monitor.admin.AnalyticsPreviewToken(secret, clock,
-                java.time.Duration.ofSeconds(Math.max(60, ttlSeconds)));
+        // Bound the TTL with an explicit min AND max (60 s .. 24 h).
+        long bounded = Math.max(60L, Math.min(ttlSeconds, 86_400L));
+        return new dev.b3monitor.admin.AnalyticsPreviewToken(secret, clock, java.time.Duration.ofSeconds(bounded));
     }
 }

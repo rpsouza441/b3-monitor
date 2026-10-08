@@ -4,11 +4,14 @@ import jakarta.persistence.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * One per-asset analytics context row belonging to an {@link AnalyticsSnapshotEntity} (cycle-16). Carries
- * the typed daily indicators (IND-01/02/04/05) each with its own readiness, plus a bounded compact string
- * of FIN-02 contextual metrics. CONTEXT only — never read into a rule decision (FIN-04). No private data.
+ * One per-asset analytics context row belonging to an {@link AnalyticsSnapshotEntity} (cycle-16; cycle-18:
+ * NUMERIC(24,12) indicators matching the validator, and FIN-02 context metrics moved to a STRUCTURED child
+ * table so every validated field round-trips losslessly). CONTEXT only — never read into a rule decision
+ * (FIN-04). No private data.
  */
 @Entity
 @Table(name = "analytics_context")
@@ -28,21 +31,21 @@ public class AnalyticsContextEntity {
     @Column(name = "as_of")
     private LocalDate asOf;
 
-    @Column(name = "sma20", precision = 20, scale = 8) private BigDecimal sma20;
-    @Column(name = "sma20_readiness", length = 16)     private String sma20Readiness;
-    @Column(name = "sma50", precision = 20, scale = 8) private BigDecimal sma50;
-    @Column(name = "sma50_readiness", length = 16)     private String sma50Readiness;
-    @Column(name = "rsi14", precision = 20, scale = 8) private BigDecimal rsi14;
-    @Column(name = "rsi14_readiness", length = 16)     private String rsi14Readiness;
-    @Column(name = "ema9", precision = 20, scale = 8)  private BigDecimal ema9;
-    @Column(name = "ema9_readiness", length = 16)      private String ema9Readiness;
-    @Column(name = "ema21", precision = 20, scale = 8) private BigDecimal ema21;
-    @Column(name = "ema21_readiness", length = 16)     private String ema21Readiness;
-    @Column(name = "volume_ratio", precision = 20, scale = 8) private BigDecimal volumeRatio;
-    @Column(name = "volume_ratio_readiness", length = 16)    private String volumeRatioReadiness;
+    @Column(name = "sma20", precision = 24, scale = 12) private BigDecimal sma20;
+    @Column(name = "sma20_readiness", length = 16)      private String sma20Readiness;
+    @Column(name = "sma50", precision = 24, scale = 12) private BigDecimal sma50;
+    @Column(name = "sma50_readiness", length = 16)      private String sma50Readiness;
+    @Column(name = "rsi14", precision = 24, scale = 12) private BigDecimal rsi14;
+    @Column(name = "rsi14_readiness", length = 16)      private String rsi14Readiness;
+    @Column(name = "ema9", precision = 24, scale = 12)  private BigDecimal ema9;
+    @Column(name = "ema9_readiness", length = 16)       private String ema9Readiness;
+    @Column(name = "ema21", precision = 24, scale = 12) private BigDecimal ema21;
+    @Column(name = "ema21_readiness", length = 16)      private String ema21Readiness;
+    @Column(name = "volume_ratio", precision = 24, scale = 12) private BigDecimal volumeRatio;
+    @Column(name = "volume_ratio_readiness", length = 16)     private String volumeRatioReadiness;
 
-    @Column(name = "context_metrics", length = 2000)
-    private String contextMetrics;
+    @OneToMany(mappedBy = "context", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    private List<AnalyticsContextMetricEntity> metrics = new ArrayList<>();
 
     @Column(name = "quality", length = 200)
     private String quality;
@@ -59,7 +62,7 @@ public class AnalyticsContextEntity {
                                   BigDecimal ema9, String ema9Readiness,
                                   BigDecimal ema21, String ema21Readiness,
                                   BigDecimal volumeRatio, String volumeRatioReadiness,
-                                  String contextMetrics, String quality, String status) {
+                                  String quality, String status) {
         this.ticker = ticker; this.asOf = asOf;
         this.sma20 = sma20; this.sma20Readiness = sma20Readiness;
         this.sma50 = sma50; this.sma50Readiness = sma50Readiness;
@@ -67,10 +70,11 @@ public class AnalyticsContextEntity {
         this.ema9 = ema9; this.ema9Readiness = ema9Readiness;
         this.ema21 = ema21; this.ema21Readiness = ema21Readiness;
         this.volumeRatio = volumeRatio; this.volumeRatioReadiness = volumeRatioReadiness;
-        this.contextMetrics = contextMetrics; this.quality = quality; this.status = status;
+        this.quality = quality; this.status = status;
     }
 
     void setSnapshot(AnalyticsSnapshotEntity s) { this.snapshot = s; }
+    public void addMetric(AnalyticsContextMetricEntity m) { m.setContext(this); metrics.add(m); }
 
     public Long getId() { return id; }
     public AnalyticsSnapshotEntity getSnapshot() { return snapshot; }
@@ -82,7 +86,7 @@ public class AnalyticsContextEntity {
     public BigDecimal getEma9() { return ema9; } public String getEma9Readiness() { return ema9Readiness; }
     public BigDecimal getEma21() { return ema21; } public String getEma21Readiness() { return ema21Readiness; }
     public BigDecimal getVolumeRatio() { return volumeRatio; } public String getVolumeRatioReadiness() { return volumeRatioReadiness; }
-    public String getContextMetrics() { return contextMetrics; }
+    public List<AnalyticsContextMetricEntity> getMetrics() { return metrics; }
     public String getQuality() { return quality; }
     public String getStatus() { return status; }
 }

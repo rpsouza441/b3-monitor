@@ -34,7 +34,7 @@ public class AnalyticsImportService {
 
     public record PreviewResult(boolean wouldImport, String schemaVersion, String snapshotId,
                                 String producer, String producerVersion, String marketAsOf,
-                                int recordCount, String canonicalChecksum, String token,
+                                int recordCount, String canonicalChecksum, String documentDigest, String token,
                                 String disposition, List<String> errors) {}
 
     public record CommitResult(String disposition, String snapshotId, String checksum, int recordCount) {
@@ -56,27 +56,37 @@ public class AnalyticsImportService {
         this.clock = clock;
     }
 
-    /** Validate-only; persists nothing. Issues an HMAC token bound to {schema, snapshotId, checksum, actor}. */
+    /** SHA-256 of the EXACT raw request bytes — the full-document digest (envelope + records + whitespace). */
+    private static String documentDigest(byte[] raw) {
+        return AnalyticsSnapshotValidator.sha256Hex(raw == null ? new byte[0] : raw);
+    }
+
+    /** Validate-only; persists nothing. Issues an HMAC token bound to BOTH the records checksum AND the
+     *  full-document digest (so an envelope-only or whitespace change invalidates the token). */
     @Transactional(readOnly = true)
     public PreviewResult preview(byte[] raw) {
         Result v = validator.validate(raw);
         if (!v.valid()) {
-            return new PreviewResult(false, null, null, null, null, null, 0, null, null, "REJECTED", v.errors());
+            return new PreviewResult(false, null, null, null, null, null, 0, null, null, null, "REJECTED", v.errors());
         }
         Snapshot s = v.snapshot();
-        String token = tokens.issue(s.schemaVersion(), s.snapshotId(), v.canonicalChecksum(),
+        String docDigest = documentDigest(raw);
+        String token = tokens.issue(s.schemaVersion(), s.snapshotId(), v.canonicalChecksum(), docDigest,
                 AdminAuditService.currentActor());
         return new PreviewResult(true, s.schemaVersion(), s.snapshotId(), s.producer(), s.producerVersion(),
-                String.valueOf(s.marketAsOf()), s.records().size(), v.canonicalChecksum(), token,
+                String.valueOf(s.marketAsOf()), s.records().size(), v.canonicalChecksum(), docDigest, token,
                 "CONSUMER_VERIFIED_SYNTHETIC", List.of());
     }
 
     /**
      * Re-validate and persist. {@code token} is the HMAC preview token; it is verified against the LIVE
-     * commit context — purpose, schemaVersion, snapshotId, canonical checksum AND actor must all match, and
-     * it must not be expired — so a token cannot be replayed across actor/content/snapshot/schema. A changed
-     * payload moves the checksum, so its MAC no longer binds. Content-mismatch, actor-mismatch, expiry,
-     * wrong-purpose and tamper all reject fail-closed.
+     * commit context — purpose, schemaVersion, snapshotId, records checksum, FULL-DOCUMENT digest AND actor
+     * must all match, and it must not be expired. So an envelope-only change (producer/version/generatedAt/
+     * marketAsOf/timezone/sourceId/quality), a whitespace change, a records change, or a different actor all
+     * move a bound field and reject fail-closed.
+     *
+     * <p>Idempotency/conflict is on the FULL DOCUMENT identity: same snapshotId + same document digest ⇒
+     * NO_OP; same snapshotId + different document ⇒ CONFLICT (never a silent overwrite).
      */
     @Transactional
     public CommitResult commit(byte[] raw, String token) {
@@ -88,46 +98,71 @@ public class AnalyticsImportService {
         }
         Snapshot s = v.snapshot();
         String checksum = v.canonicalChecksum();
+        String docDigest = documentDigest(raw);
         String actor = AdminAuditService.currentActor();
 
-        // Cryptographic preview→commit binding across content AND authorization context (actor/schema/
-        // snapshot/purpose/expiry). The token NEVER carries a secret or raw payload — only the digest.
-        var verdict = tokens.verify(token, s.schemaVersion(), s.snapshotId(), checksum, actor);
+        var verdict = tokens.verify(token, s.schemaVersion(), s.snapshotId(), checksum, docDigest, actor);
         if (!verdict.valid()) {
             audit.recordRejection(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, Outcome.REJECTED_VALIDATION,
                     "snapshot import rejected: preview token " + verdict.rejection() + " for " + s.snapshotId());
             return new CommitResult("REJECTED_TOKEN_" + verdict.rejection(), s.snapshotId(), checksum, 0);
         }
 
-        Optional<AnalyticsSnapshotEntity> existing = snapshots.findBySnapshotId(s.snapshotId());
-        if (existing.isPresent()) {
-            if (existing.get().getChecksum().equals(checksum)) {
-                audit.record(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, null, Outcome.NO_OP,
-                        "snapshot already imported (idempotent): " + s.snapshotId());
-                return new CommitResult("IDEMPOTENT_NOOP", s.snapshotId(), checksum, existing.get().getRecordCount());
-            }
-            audit.recordRejection(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, Outcome.REJECTED_CONFLICT,
-                    "snapshot id reused with a different checksum: " + s.snapshotId());
-            return new CommitResult("REJECTED_CONFLICT", s.snapshotId(), checksum, 0);
-        }
+        var existing = snapshots.findBySnapshotId(s.snapshotId());
+        if (existing.isPresent()) return disposeExisting(existing.get(), s, checksum, docDigest);
 
-        AnalyticsSnapshotEntity ent = new AnalyticsSnapshotEntity(
-                s.snapshotId(), s.schemaVersion(), s.producer(), s.producerVersion(), s.generatedAt(),
-                s.marketAsOf(), s.timezone(), s.sourceId(), checksum, s.records().size(),
-                clock.instant(), actor, ConsumerStatus.CONSUMER_VERIFIED_SYNTHETIC.name());
-        for (AnalyticsSnapshotContract.Record r : s.records()) {
-            IndicatorSet ind = r.indicators();
-            ent.addRow(new AnalyticsContextEntity(r.ticker(), r.asOf(),
-                    v(ind, Ind.SMA20), rd(ind, Ind.SMA20), v(ind, Ind.SMA50), rd(ind, Ind.SMA50),
-                    v(ind, Ind.RSI14), rd(ind, Ind.RSI14), v(ind, Ind.EMA9), rd(ind, Ind.EMA9),
-                    v(ind, Ind.EMA21), rd(ind, Ind.EMA21), v(ind, Ind.VOL), rd(ind, Ind.VOL),
-                    encodeContext(r.context()), r.quality(), r.status()));
+        AnalyticsSnapshotEntity ent = build(s, checksum, docDigest, actor);
+        try {
+            snapshots.saveAndFlush(ent);   // flush so a concurrent unique-violation surfaces HERE, not post-commit
+        } catch (org.springframework.dao.DataIntegrityViolationException race) {
+            // Item K: a concurrent commit of the SAME snapshotId won the unique constraint. Re-read the
+            // durable row and compare the FULL document identity — translate ONLY this specific race, never
+            // an arbitrary integrity error, into the user-level idempotent/conflict outcome.
+            var now = snapshots.findBySnapshotId(s.snapshotId());
+            if (now.isPresent()) return disposeExisting(now.get(), s, checksum, docDigest);
+            throw race;   // not the snapshot-id race we understand — do not swallow it
         }
-        snapshots.save(ent);
         audit.record(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, (long) s.records().size(), Outcome.SUCCESS,
                 "imported snapshot " + s.snapshotId() + " (" + s.records().size() + " records, checksum "
                         + checksum.substring(0, 12) + "…)");
         return new CommitResult("IMPORTED", s.snapshotId(), checksum, s.records().size());
+    }
+
+    /** Resolve a re-import against an already-durable snapshot by FULL document identity. */
+    private CommitResult disposeExisting(AnalyticsSnapshotEntity existing, Snapshot s, String checksum, String docDigest) {
+        boolean sameDoc = docDigest.equals(existing.getDocumentDigest())
+                || (existing.getDocumentDigest() == null && checksum.equals(existing.getChecksum()));
+        if (sameDoc) {
+            audit.record(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, null, Outcome.NO_OP,
+                    "snapshot already imported (idempotent, same document): " + s.snapshotId());
+            return new CommitResult("IDEMPOTENT_NOOP", s.snapshotId(), checksum, existing.getRecordCount());
+        }
+        audit.recordRejection(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, Outcome.REJECTED_CONFLICT,
+                "snapshot id reused with a different document: " + s.snapshotId());
+        return new CommitResult("REJECTED_CONFLICT", s.snapshotId(), checksum, 0);
+    }
+
+    private AnalyticsSnapshotEntity build(Snapshot s, String checksum, String docDigest, String actor) {
+        AnalyticsSnapshotEntity ent = new AnalyticsSnapshotEntity(
+                s.snapshotId(), s.schemaVersion(), s.producer(), s.producerVersion(), s.generatedAt(),
+                s.marketAsOf(), s.timezone(), s.sourceId(), checksum, docDigest, s.records().size(),
+                clock.instant(), actor, ConsumerStatus.CONSUMER_VERIFIED_SYNTHETIC.name());
+        for (AnalyticsSnapshotContract.Record r : s.records()) {
+            IndicatorSet ind = r.indicators();
+            AnalyticsContextEntity row = new AnalyticsContextEntity(r.ticker(), r.asOf(),
+                    v(ind, Ind.SMA20), rd(ind, Ind.SMA20), v(ind, Ind.SMA50), rd(ind, Ind.SMA50),
+                    v(ind, Ind.RSI14), rd(ind, Ind.RSI14), v(ind, Ind.EMA9), rd(ind, Ind.EMA9),
+                    v(ind, Ind.EMA21), rd(ind, Ind.EMA21), v(ind, Ind.VOL), rd(ind, Ind.VOL),
+                    r.quality(), r.status());
+            if (r.context() != null) {
+                for (ContextMetric c : r.context()) {   // lossless: every validated field persisted structurally
+                    row.addMetric(new AnalyticsContextMetricEntity(c.name(), c.value(), c.units(),
+                            c.readiness() == null ? null : c.readiness().name(), c.quality()));
+                }
+            }
+            ent.addRow(row);
+        }
+        return ent;
     }
 
     private enum Ind { SMA20, SMA50, RSI14, EMA9, EMA21, VOL }
@@ -146,20 +181,6 @@ public class AnalyticsImportService {
             case EMA9 -> s.ema9Readiness();   case EMA21 -> s.ema21Readiness(); case VOL -> s.volumeRatioReadiness();
         };
         return r == null ? MetricReadiness.NOT_READY.name() : r.name();
-    }
-
-    /** Bounded compact encoding of FIN-02 context metrics for storage/display. */
-    private static String encodeContext(List<ContextMetric> cs) {
-        if (cs == null || cs.isEmpty()) return null;
-        StringBuilder sb = new StringBuilder();
-        for (ContextMetric c : cs) {
-            if (sb.length() > 1800) break;   // bounded
-            sb.append(c.name()).append('=').append(c.value() == null ? "" : c.value().toPlainString())
-              .append(':').append(c.units() == null ? "" : c.units())
-              .append(':').append(c.readiness()).append('#');
-        }
-        String out = sb.toString();
-        return out.length() > 2000 ? out.substring(0, 2000) : out;
     }
 
     private static String firstError(List<String> errors) {
