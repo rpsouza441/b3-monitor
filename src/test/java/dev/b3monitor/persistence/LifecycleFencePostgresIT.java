@@ -38,8 +38,11 @@ import static org.junit.jupiter.api.Assertions.*;
  * hardened them: race 1 no longer swallows exceptions (only an exact optimistic-lock conflict is legal;
  * anything else fails via {@code Future.get}); race 4 proves the lock-wait at the DATABASE level via
  * {@code pg_blocking_pids()} and guards against a never-scheduled competitor with a {@code competitorEntered}
- * latch; all executors are closed in finally. No DB transaction spans adapter I/O. REQUIRES Docker; runs
- * only under {@code mvn verify -Pdocker-it}.
+ * latch; all executors are closed in finally. Cycle-15 fixed race 4's connection identity: the holder reads
+ * {@code pg_backend_pid()} and takes the PESSIMISTIC_WRITE lock through the SAME Hibernate/JPA connection
+ * (via {@code EntityManager.unwrap(Session).doReturningWork}), so the proven blocker pid is provably the
+ * backend that holds the lock — not an unrelated pooled connection. No DB transaction spans adapter I/O.
+ * REQUIRES Docker; runs only under {@code mvn verify -Pdocker-it}.
  */
 @Testcontainers
 @SpringBootTest
@@ -156,7 +159,6 @@ class LifecycleFencePostgresIT {
     // ===== cycle-13 P1-B: TRUE concurrent races (CyclicBarrier + 2 threads + independent tx) =====
 
     @Autowired RuleDefinitionRepository ruleDefs;
-    @Autowired org.springframework.transaction.PlatformTransactionManager txm;
 
     /** Race 1 — pause vs process from the same pre-race state. Both threads start together; whichever
      *  acquires the PESSIMISTIC_WRITE fence first wins, and the invariant must hold regardless of order:
@@ -258,21 +260,25 @@ class LifecycleFencePostgresIT {
         }
     }
 
-    /** Race 4 — EXPLICIT locking proof with a false-positive guard. Thread A opens a transaction, takes
-     *  the PESSIMISTIC_WRITE row lock and holds it pinned by a latch. Thread B counts down
-     *  {@code competitorEntered} IMMEDIATELY before invoking the production pause path, so the main thread
-     *  only tests the blocked state AFTER the competitor is known to have started — a competitor that was
-     *  never scheduled can no longer produce a false pass. The lock-wait is then proven at the DATABASE
-     *  level via {@code pg_blocking_pids()}: the holder's backend pid must appear among the pids blocking
-     *  the competitor's backend. The {@code Thread.sleep} is NOT the race coordinator — the latch is; the
-     *  sleep only lets the competitor's statement reach the lock-wait queue before we probe it. All
-     *  executors are closed in finally and no exception is swallowed. */
+    /** Race 4 — EXPLICIT locking proof with a false-positive guard AND transaction-bound connection
+     *  identity. Thread A opens a JPA transaction, reads {@code pg_backend_pid()} THROUGH THE SAME
+     *  Hibernate/JPA connection that will hold the lock (via {@code EntityManager.unwrap(Session).doWork})
+     *  — NOT a fresh {@code dataSource.getConnection()}, which would pull an unrelated pooled backend and
+     *  make the proven pid meaningless. It then takes the PESSIMISTIC_WRITE row lock IN THAT SAME
+     *  transaction and holds it pinned by a latch. Thread B counts down {@code competitorEntered}
+     *  IMMEDIATELY before invoking the production pause path, so the main thread only tests the blocked
+     *  state AFTER the competitor is known to have started — a competitor that was never scheduled can no
+     *  longer produce a false pass. The lock-wait is then proven at the DATABASE level via
+     *  {@code pg_blocking_pids()}: the holder's backend pid must appear among the pids blocking the
+     *  competitor's backend. The {@code Thread.sleep} is NOT the race coordinator — the latch is; the sleep
+     *  only lets the competitor's statement reach the lock-wait queue before we probe it. All executors are
+     *  closed and the lock is released in finally, and no exception is swallowed. */
     @Autowired javax.sql.DataSource dataSource;
+    @jakarta.persistence.PersistenceContext jakarta.persistence.EntityManagerFactory emf;
 
     @Test
     void race_pessimisticLockActuallyBlocksCompetitor() throws Exception {
         seedCrossing("pg-r4");
-        var tt = new org.springframework.transaction.support.TransactionTemplate(txm);
         var lockAcquired = new java.util.concurrent.CountDownLatch(1);
         var holderPid = new java.util.concurrent.atomic.AtomicLong(-1);
         var competitorEntered = new java.util.concurrent.CountDownLatch(1);
@@ -281,19 +287,40 @@ class LifecycleFencePostgresIT {
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         java.util.concurrent.Future<?> holder = null, competitor = null;
         try {
-            // A: open a tx, capture its backend pid, take the row lock, signal, hold until released.
-            holder = pool.submit(() -> tt.execute(s -> {
-                try (var c = dataSource.getConnection(); var st = c.createStatement();
-                     var rs = st.executeQuery("select pg_backend_pid()")) {
-                    rs.next(); holderPid.set(rs.getLong(1));
-                } catch (java.sql.SQLException e) { throw new RuntimeException(e); }
-                ruleDefs.findByRuleIdForUpdate("pg-r4").orElseThrow();   // PESSIMISTIC_WRITE
-                lockAcquired.countDown();
-                try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); }
-                catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            // A: open a tx; read pg_backend_pid() and take the row lock through the SAME EntityManager/
+            // Hibernate connection, so holderPid is provably the backend that holds the PESSIMISTIC_WRITE.
+            holder = pool.submit(() -> {
+                var em = emf.createEntityManager();
+                var etx = em.getTransaction();
+                etx.begin();
+                try {
+                    long pid = em.unwrap(org.hibernate.Session.class).doReturningWork(conn -> {
+                        try (var st = conn.createStatement(); var rs = st.executeQuery("select pg_backend_pid()")) {
+                            rs.next();
+                            return rs.getLong(1);
+                        }
+                    });
+                    holderPid.set(pid);
+                    // PESSIMISTIC_WRITE row lock on the SAME connection whose pid we just captured.
+                    em.createQuery("select r from RuleDefinitionEntity r where r.ruleId = :id",
+                                    RuleDefinitionEntity.class)
+                            .setParameter("id", "pg-r4")
+                            .setLockMode(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+                            .getSingleResult();
+                    lockAcquired.countDown();
+                    release.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                    etx.commit();
+                } catch (RuntimeException | InterruptedException e) {
+                    try { if (etx.isActive()) etx.rollback(); } catch (RuntimeException ignore) { /* rollback best-effort */ }
+                    if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+                    throw new RuntimeException(e);
+                } finally {
+                    em.close();
+                }
                 return null;
-            }));
+            });
             assertTrue(lockAcquired.await(5, java.util.concurrent.TimeUnit.SECONDS), "holder acquired the lock");
+            assertTrue(holderPid.get() > 0, "captured the holder's backend pid from its OWN JPA connection");
 
             // B: signal entry IMMEDIATELY before the production pause call, so we never test "blocked"
             // against a competitor that was simply never scheduled.
@@ -317,12 +344,13 @@ class LifecycleFencePostgresIT {
                 try (var rs = ps.executeQuery()) { rs.next(); blockedByHolder = rs.getLong(1) >= 1; }
             }
             assertTrue(blockedByHolder,
-                    "pg_blocking_pids proves a backend is lock-blocked by the holder pid " + holderPid.get());
+                    "pg_blocking_pids proves a backend is lock-blocked by the holder pid " + holderPid.get()
+                            + " (the SAME connection that holds the PESSIMISTIC_WRITE)");
 
             long releasedAt = System.nanoTime();
             release.countDown();                                 // release the lock
-            holder.get(5, java.util.concurrent.TimeUnit.SECONDS);
-            competitor.get(5, java.util.concurrent.TimeUnit.SECONDS);   // now it completes
+            holder.get(5, java.util.concurrent.TimeUnit.SECONDS);        // propagates any holder failure
+            competitor.get(5, java.util.concurrent.TimeUnit.SECONDS);    // propagates any competitor failure; now completes
             assertTrue(pauseReturnedAt.get() >= releasedAt, "pause resolved only AFTER the lock was released");
         } finally {
             release.countDown();                                 // ensure the holder never dangles
