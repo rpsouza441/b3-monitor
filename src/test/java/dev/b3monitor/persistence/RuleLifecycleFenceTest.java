@@ -140,17 +140,42 @@ class RuleLifecycleFenceTest {
         var pool = Executors.newFixedThreadPool(2);
         CountDownLatch go = new CountDownLatch(1);
         Future<?> f1 = pool.submit(() -> { go.await(); admin.pause(id); return null; });
+        // process races pause; its ONLY legal in-race failure is an optimistic-lock conflict when it loses
+        // the rule-state write to the concurrent revision bump. The worker rethrows (no swallow); Future.get
+        // surfaces it and we assert its exact type. Any other failure fails the test.
         Future<?> f2 = pool.submit(() -> { go.await();
-            try { processing.process(snapshot(id, rev), q(new BigDecimal("50.50"), NOW.minusSeconds(60))); }
-            catch (Exception ignored) {} return null; });
+            processing.process(snapshot(id, rev), q(new BigDecimal("50.50"), NOW.minusSeconds(60)));
+            return null; });
         go.countDown();
-        f1.get(15, TimeUnit.SECONDS); f2.get(15, TimeUnit.SECONDS);   // completes → no deadlock
+        f1.get(15, TimeUnit.SECONDS);
+        try {
+            f2.get(15, TimeUnit.SECONDS);                            // completes → no deadlock
+        } catch (ExecutionException ee) {
+            assertTrue(isOptimisticConflict(ee.getCause()),
+                    "the only legal in-race process failure is an optimistic-lock conflict against the "
+                            + "concurrent pause revision bump, but got: " + ee.getCause());
+        }
         pool.shutdownNow();
         // Whatever the interleaving, an active rule must never be left with an uncancelled PENDING:
         // either process lost (no PENDING) or process won then pause cancelled it.
         assertEquals(0, outbox.findByRuleIdAndState(id, OutboxState.PENDING).size(),
                 "no unsent PENDING survives a committed pause");
         cleanup(id);
+    }
+
+    /** The only acceptable losing-process failure in the pause-vs-process race: an optimistic-lock
+     *  conflict against the concurrent revision bump. Anything else (SQL error, deadlock, bug) must fail. */
+    private static boolean isOptimisticConflict(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof org.springframework.orm.ObjectOptimisticLockingFailureException
+                    || c instanceof org.springframework.dao.OptimisticLockingFailureException
+                    || c instanceof org.springframework.dao.CannotAcquireLockException
+                    || c instanceof org.hibernate.StaleObjectStateException
+                    || (c.getClass().getName().contains("OptimisticLock"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ----- item B: retry-safe / idempotent mutations -----

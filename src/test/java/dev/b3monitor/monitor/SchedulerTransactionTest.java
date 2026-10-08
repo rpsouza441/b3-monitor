@@ -186,14 +186,53 @@ class SchedulerTransactionTest {
         CountDownLatch start = new CountDownLatch(1);
         List<Future<?>> fs = new ArrayList<>();
         for (int i = 0; i < threads; i++) {
-            fs.add(pool.submit(() -> { start.await(); try { pipeline.runOnce(rule); } catch (Exception ignored) {} return null; }));
+            // Each worker races to create the FIRST rule_state row. Exactly one wins; the losers may
+            // legitimately hit a uniqueness / optimistic-lock conflict on the unique (rule_id) row. We do
+            // NOT swallow it: the worker rethrows, and Future.get surfaces it below where its exact type is
+            // asserted. Any OTHER failure (SQL error, NPE, deadlock) must fail the test.
+            fs.add(pool.submit(() -> { start.await(); pipeline.runOnce(rule); return null; }));
         }
         start.countDown();
-        for (Future<?> f : fs) f.get(15, TimeUnit.SECONDS);
+        for (Future<?> f : fs) {
+            try {
+                f.get(15, TimeUnit.SECONDS);
+            } catch (ExecutionException ee) {
+                assertTrue(isLegalFirstCreationRace(ee.getCause()),
+                        "the only legal in-race worker failure is a uniqueness/optimistic conflict on the "
+                                + "first rule_state insert, but got: " + describe(ee.getCause()));
+            }
+        }
         pool.shutdownNow();
         assertEquals(1, ruleStates.findAll().stream().filter(s -> s.getRuleId().equals("rT")).count(),
                 "exactly one rule_state row despite concurrent first creation");
         assertEquals(0, outbox.count(), "a concurrent first baseline must not fire");
+    }
+
+    /** The ONLY acceptable losing-worker failure in the first-creation race: a uniqueness constraint
+     *  violation or an optimistic-lock conflict on the unique rule_state row. Anything else is a real bug. */
+    private static boolean isLegalFirstCreationRace(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof org.springframework.dao.DataIntegrityViolationException
+                    || c instanceof org.springframework.dao.DuplicateKeyException
+                    || c instanceof org.springframework.orm.ObjectOptimisticLockingFailureException
+                    || c instanceof org.springframework.dao.OptimisticLockingFailureException
+                    || c instanceof org.springframework.dao.CannotAcquireLockException
+                    || c instanceof org.hibernate.exception.ConstraintViolationException
+                    || c instanceof java.sql.SQLIntegrityConstraintViolationException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String describe(Throwable t) {
+        if (t == null) return "null";
+        StringBuilder sb = new StringBuilder();
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            sb.append(c.getClass().getName()).append(": ").append(c.getMessage()).append(" <- ");
+            if (c.getCause() == c) break;
+        }
+        return sb.toString();
     }
 
     @Test
