@@ -1,19 +1,20 @@
-# B3 Monitor — Development Handoff (rev 15)
+# B3 Monitor — Development Handoff (rev 16)
 
 **MVP vertical:** validated B3 quote monitoring with explainable CROSSING price alerts, a durable
-submission-authority outbox, a linearizable rule-lifecycle fence, an append-only admin audit ledger, and a
-fail-closed authenticated private admin surface + browser UI (status / readiness / assets / rules / outbox /
-alerts / audit). Offline/local only — no live Brapi, no live WAHA, no activation, no deploy.
+submission-authority outbox, a linearizable rule-lifecycle fence, an append-only admin audit ledger, a
+fail-closed authenticated private admin surface + browser UI (status / readiness / assets / analytics /
+imports / rules / outbox / alerts / audit), and a fail-closed analytics-snapshot CONSUMER contract with an
+ADMIN preview→commit importer. Offline/local only — no live Brapi, no live WAHA, no activation, no deploy.
 
 ## Build & test
 
-- **Spring Boot 4.1.1**, Java 21. `mvn test` → **216 passed, 0 failures, 0 errors**.
-- **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` + `LifecycleFencePostgresIT` (true concurrency
-  races; cycle-15 the lock-wait proof reads `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` lock through
-  the SAME Hibernate/JPA connection via `EntityManager.unwrap(Session).doReturningWork`, with a
-  `pg_blocking_pids()` block assertion + `competitorEntered` latch) compile and run under
-  `mvn verify -Pdocker-it`. Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
-- Migrations **V1–V13** (Flyway).
+- **Spring Boot 4.1.1**, Java 21. `mvn test` → **231 passed, 0 failures, 0 errors**.
+- **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` (V1–V14 incl. the V14 analytics schema +
+  the extended audit CHECK) + `LifecycleFencePostgresIT` (true concurrency races; the lock-wait proof reads
+  `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` lock through the SAME Hibernate/JPA connection via
+  `EntityManager.unwrap(Session).doReturningWork`, with a `pg_blocking_pids()` block assertion) compile and
+  run under `mvn verify -Pdocker-it`. Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
+- Migrations **V1–V14** (Flyway). V14 = analytics_snapshot/analytics_context provenance + IMPORT_SNAPSHOT audit action.
 
 ## Git (branch `checkpoint/cycle7-reviewed`, NO push — `git branch -r` = only `origin/main`)
 
@@ -21,14 +22,34 @@ alerts / audit). Offline/local only — no live Brapi, no live WAHA, no activati
 |---|---|
 | `0035487`..`9b0c8d5` | cycle-12 (UI RBAC + session expiry, Postgres V13 IT prep, UI-01, UI-03 groundwork, docs) |
 | `62f053f`..`653674c` | cycle-13 (UI-03 full lifecycle, true concurrency races, bounded session timeout, docs) |
-| `c9f0aac`..`8d5eec2` | cycle-14 (concurrency-test integrity, UI-03 ordering, README/STATE drift, UI-02 readiness, docs + archive CYCLE13) |
-| `f07b8e7` | **cycle-15: bind postgres lock-proof pid to the lock-holding JPA connection** |
-| `625a135` | **cycle-15: remove swallowed concurrency failures; assert exact legal race exception** |
-| `41e8b31` | **cycle-15: close factual drift in README/STATE (216, Boot 4.1.1, V1-V13, local commits, 0/8)** |
-| `b46a683` | **cycle-15: split UI-02 readiness into wiring/operational/runtime dimensions** |
-| (this) | **cycle-15 docs rev 15 + CYCLE15 evidence + archive CYCLE14** |
+| `c9f0aac`..`8d5eec2` | cycle-14 (concurrency-test integrity, UI-03 ordering, README/STATE drift, UI-02 readiness, docs) |
+| `f07b8e7`..`06492c6` | cycle-15 (transaction-bound lock proof, no swallowed races, factual drift, readiness dimensions, docs) |
+| `28c16a3` | **cycle-16: analytics consumer contract v1 + fail-closed validator + V14 provenance** |
+| `8cb0a09` | **cycle-16: ADMIN preview→commit importer + UI-01 analytics context + UI-02 import history** |
+| `ac9ee2b` | **cycle-16: analytics import validation/idempotency/RBAC + V14 postgres schema tests** |
+| `c7ecc40` | **cycle-16: analytics snapshot producer-boundary document** |
+| (this) | **cycle-16 docs rev 16 + CYCLE16 evidence + archive CYCLE15** |
 
-## Cycle-15 changes (detail: `CYCLE15-REVIEW-EVIDENCE.md`)
+## Cycle-16 changes (detail: `CYCLE16-REVIEW-EVIDENCE.md`)
+
+- **Consumer contract v1 (FIN-01/03/04).** `AnalyticsSnapshotContract` + a fail-closed
+  `AnalyticsSnapshotValidator`: typed daily indicators (IND-01/02/04/05) each with its own readiness + FIN-02
+  context metrics; canonical-checksum idempotency; rejects unknown schema/malformed/unknown-ticker/future-asof/
+  checksum-mismatch/oversize/private-portfolio keys (XIRR/holdings/…)/dangerous content. No private data.
+- **V14 provenance.** `analytics_snapshot` (unique snapshotId) + `analytics_context` (typed indicators, bounded
+  context string, cascade); V13 audit CHECK extended with `IMPORT_SNAPSHOT`.
+- **ADMIN preview→commit importer.** Cryptographic preview token binds the committed bytes (changed content
+  rejected); idempotent on same id+checksum; conflict on same id/different checksum; appends IMPORT_SNAPSHOT
+  audit. Authorizes nothing, enables no worker, triggers no Brapi/WAHA, changes no rule.
+- **UI-01** `/admin/analytics`: analytics context SEPARATE from quote freshness (analytics-stale vs
+  analytics-missing vs NOT_INTEGRATED vs CONSUMER_VERIFIED_SYNTHETIC). **UI-02** `/admin/imports`: bounded
+  import history + an `analytics_consumer` readiness component (wiring READY, runtime NOT_VERIFIED until a real
+  snapshot). **UI-02 stays PARTIAL.**
+- **Producer boundary** `docs/contracts/ANALYTICS-SNAPSHOT-CONTRACT.md`: what a future authorized
+  projecao-carteira exporter must produce; "consumer contract implemented" ≠ "integration complete".
+  projecao-carteira NOT edited. **No REAL producer snapshot consumed** (synthetic only).
+
+## Cycle-15 changes (detail: `archive/cycles/CYCLE15-REVIEW-EVIDENCE.md`)
 
 - **A — lock-proof connection identity.** The `pg_blocking_pids()` lock-wait proof now reads
   `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` row lock through the SAME Hibernate/JPA connection
@@ -37,13 +58,11 @@ alerts / audit). Offline/local only — no live Brapi, no live WAHA, no activati
 - **B — no swallowed concurrency failures.** `SchedulerTransactionTest` first-creation race and
   `RuleLifecycleFenceTest` pause-vs-process no longer `catch (Exception ignored)`; workers rethrow, `Future.get`
   surfaces failures, and only a typed uniqueness/optimistic conflict is accepted. Tree scan → 0 swallowed catches.
-- **C — factual drift fully closed.** README (both 213→216) and STATE (frontmatter + Current Position +
-  Progress + Performance Metrics 134→216/V1-V8→V1-V13 + Session Continuity + task-authorization line) corrected
-  to current reality; phase closure 0/8; seven protected inputs untouched; stale-fact scan clean on the overlay.
-- **D — readiness semantics.** `ReadinessComponentView` now reports independent `wiringStatus` /
-  `operationalStatus` / `runtimeStatus` + detail; code integration never conflated with authorization or runtime
-  verification. Read-only; **UI-02 stays PARTIAL.**
-- **E — optional** bulk-fetch attempt optimization **skipped** (bounded 1+N is not a defect; do not risk the cycle).
+- **C — factual drift fully closed.** README (both 213→216) and STATE corrected to current reality; phase
+  closure 0/8; seven protected inputs untouched; stale-fact scan clean on the overlay.
+- **D — readiness semantics.** `ReadinessComponentView` reports independent `wiringStatus` /
+  `operationalStatus` / `runtimeStatus` + detail. Read-only; **UI-02 stays PARTIAL.**
+- **E — optional** bulk-fetch attempt optimization **skipped** (bounded 1+N is not a defect).
 
 ## Cycle-14 changes (detail: `archive/cycles/CYCLE14-REVIEW-EVIDENCE.md`)
 
