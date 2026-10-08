@@ -1,4 +1,4 @@
-# B3 Monitor — Development Handoff (rev 14)
+# B3 Monitor — Development Handoff (rev 15)
 
 **MVP vertical:** validated B3 quote monitoring with explainable CROSSING price alerts, a durable
 submission-authority outbox, a linearizable rule-lifecycle fence, an append-only admin audit ledger, and a
@@ -9,8 +9,10 @@ alerts / audit). Offline/local only — no live Brapi, no live WAHA, no activati
 
 - **Spring Boot 4.1.1**, Java 21. `mvn test` → **216 passed, 0 failures, 0 errors**.
 - **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` + `LifecycleFencePostgresIT` (true concurrency
-  races, cycle-14-hardened with a `pg_blocking_pids` lock-wait proof + `competitorEntered` latch) compile and
-  run under `mvn verify -Pdocker-it`. Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
+  races; cycle-15 the lock-wait proof reads `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` lock through
+  the SAME Hibernate/JPA connection via `EntityManager.unwrap(Session).doReturningWork`, with a
+  `pg_blocking_pids()` block assertion + `competitorEntered` latch) compile and run under
+  `mvn verify -Pdocker-it`. Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
 - Migrations **V1–V13** (Flyway).
 
 ## Git (branch `checkpoint/cycle7-reviewed`, NO push — `git branch -r` = only `origin/main`)
@@ -19,13 +21,31 @@ alerts / audit). Offline/local only — no live Brapi, no live WAHA, no activati
 |---|---|
 | `0035487`..`9b0c8d5` | cycle-12 (UI RBAC + session expiry, Postgres V13 IT prep, UI-01, UI-03 groundwork, docs) |
 | `62f053f`..`653674c` | cycle-13 (UI-03 full lifecycle, true concurrency races, bounded session timeout, docs) |
-| `c9f0aac` | **cycle-14: harden postgres concurrency tests (no swallowed exceptions, pg_blocking_pids proof)** |
-| `0068130` | **cycle-14: UI-03 semantic ordering (intentCreatedAt DESC, id DESC)** |
-| `0f70334` | **cycle-14: correct README/STATE factual drift** |
-| `f4e3b74` | **cycle-14: read-only UI-02 readiness view** |
-| (this) | **cycle-14 docs + archive CYCLE13** |
+| `c9f0aac`..`8d5eec2` | cycle-14 (concurrency-test integrity, UI-03 ordering, README/STATE drift, UI-02 readiness, docs + archive CYCLE13) |
+| `f07b8e7` | **cycle-15: bind postgres lock-proof pid to the lock-holding JPA connection** |
+| `625a135` | **cycle-15: remove swallowed concurrency failures; assert exact legal race exception** |
+| `41e8b31` | **cycle-15: close factual drift in README/STATE (216, Boot 4.1.1, V1-V13, local commits, 0/8)** |
+| `b46a683` | **cycle-15: split UI-02 readiness into wiring/operational/runtime dimensions** |
+| (this) | **cycle-15 docs rev 15 + CYCLE15 evidence + archive CYCLE14** |
 
-## Cycle-14 changes (detail: `CYCLE14-REVIEW-EVIDENCE.md`)
+## Cycle-15 changes (detail: `CYCLE15-REVIEW-EVIDENCE.md`)
+
+- **A — lock-proof connection identity.** The `pg_blocking_pids()` lock-wait proof now reads
+  `pg_backend_pid()` and takes the `PESSIMISTIC_WRITE` row lock through the SAME Hibernate/JPA connection
+  (`EntityManager.unwrap(Session).doReturningWork`), so the pid proven blocked is provably the lock holder —
+  not an unrelated pooled backend. NOT_RUN (Docker absent).
+- **B — no swallowed concurrency failures.** `SchedulerTransactionTest` first-creation race and
+  `RuleLifecycleFenceTest` pause-vs-process no longer `catch (Exception ignored)`; workers rethrow, `Future.get`
+  surfaces failures, and only a typed uniqueness/optimistic conflict is accepted. Tree scan → 0 swallowed catches.
+- **C — factual drift fully closed.** README (both 213→216) and STATE (frontmatter + Current Position +
+  Progress + Performance Metrics 134→216/V1-V8→V1-V13 + Session Continuity + task-authorization line) corrected
+  to current reality; phase closure 0/8; seven protected inputs untouched; stale-fact scan clean on the overlay.
+- **D — readiness semantics.** `ReadinessComponentView` now reports independent `wiringStatus` /
+  `operationalStatus` / `runtimeStatus` + detail; code integration never conflated with authorization or runtime
+  verification. Read-only; **UI-02 stays PARTIAL.**
+- **E — optional** bulk-fetch attempt optimization **skipped** (bounded 1+N is not a defect; do not risk the cycle).
+
+## Cycle-14 changes (detail: `archive/cycles/CYCLE14-REVIEW-EVIDENCE.md`)
 
 - **A — concurrency-test integrity.** Removed the catch-and-ignore in the pause-vs-process race (only an exact
   optimistic-lock conflict is legal; anything else fails via `Future.get`). Fixed the lock-wait false positive
