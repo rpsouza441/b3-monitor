@@ -15,7 +15,7 @@ import java.time.Instant;
 @Table(name = "admin_audit_event")
 public class AdminAuditEvent {
 
-    public enum Action { CREATE_RULE, EDIT_RULE, SELECT_MODE, PAUSE, RESUME, DISABLE }
+    public enum Action { CREATE_RULE, EDIT_RULE, SELECT_MODE, PAUSE, RESUME, DISABLE, IMPORT_SNAPSHOT }
     public enum Outcome { SUCCESS, NO_OP, REJECTED_CONFLICT, REJECTED_VALIDATION, ERROR }
 
     @Id

@@ -74,6 +74,32 @@ public final class AdminDtos {
     public record AlertOutcomeListView(List<AlertOutcomeView> alerts) {}
     public record AssetFreshnessListView(List<AssetFreshnessView> assets) {}
 
+    /** UI-02 (cycle-16): one bounded import-history row — provenance only, checksum shown as a prefix. */
+    public record ImportHistoryView(String snapshotId, String producer, String producerVersion,
+                                    String schemaVersion, String marketAsOf, Instant generatedAt,
+                                    Instant importedAt, String importedBy, int recordCount,
+                                    String checksumPrefix, String status) {}
+
+    public record ImportHistoryListView(List<ImportHistoryView> imports) {}
+
+    /** UI-01 (cycle-16): one asset's analytics context, SEPARATE from quote freshness. {@code present=false}
+     *  ⇒ no snapshot imported for this asset (explicit no-data). Indicators carry their own readiness; nothing
+     *  is synthesized, and this is CONTEXT only — never a rule input or operational authorization. */
+    public record AnalyticsContextView(String ticker, boolean present,
+                                       String snapshotId, String producer, String producerVersion,
+                                       String schemaVersion, String analyticsAsOf, Instant importedAt,
+                                       Long analyticsAgeSeconds, boolean analyticsStale,
+                                       BigDecimal sma20, String sma20Readiness,
+                                       BigDecimal sma50, String sma50Readiness,
+                                       BigDecimal rsi14, String rsi14Readiness,
+                                       BigDecimal ema9, String ema9Readiness,
+                                       BigDecimal ema21, String ema21Readiness,
+                                       BigDecimal volumeRatio, String volumeRatioReadiness,
+                                       String contextMetrics, String quality, String status,
+                                       String integrationStatus) {}
+
+    public record AnalyticsContextListView(List<AnalyticsContextView> rows) {}
+
     /** UI-02 (cycle-14 E; refined cycle-15 D): a READ-ONLY operator readiness snapshot. Each component
      *  reports THREE INDEPENDENT dimensions so code integration, operational authorization and runtime
      *  verification are never conflated:

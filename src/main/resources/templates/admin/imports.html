@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Analytics imports</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:80rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%;font-size:.85rem}td,th{border:1px solid #ccc;padding:.25rem .4rem;text-align:left}form.inline{display:inline}.ok{color:#1a7f37}.err{color:#b00020}textarea{width:100%;height:9rem;font-family:monospace}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/readiness}">Readiness</a>
+    <a th:href="@{/admin/assets}">Assets</a>
+    <a th:href="@{/admin/analytics}">Analytics</a>
+    <a th:href="@{/admin/imports}">Imports</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/alerts}">Alerts</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Analytics snapshot imports (UI-02)</h1>
+  <p>Import a validated analytics snapshot (ADMIN only). Importing is CONTEXT only: it authorizes no asset,
+     enables no worker, triggers no Brapi/WAHA, and changes no rule. Preview validates without persisting;
+     commit requires the exact previewed content (cryptographic token). A re-import of the same snapshot id +
+     checksum is idempotent; a different checksum is a conflict.</p>
+
+  <p th:if="${ok}" class="ok" th:text="${ok}"></p>
+  <p th:if="${error}" class="err" th:text="${error}"></p>
+
+  <div th:if="${preview != null and preview.wouldImport()}">
+    <h2>Preview — ready to commit</h2>
+    <ul>
+      <li>Snapshot: <span th:text="${preview.snapshotId()}"></span></li>
+      <li>Producer: <span th:text="${preview.producer()} + ' ' + ${preview.producerVersion()}"></span></li>
+      <li>Schema: <span th:text="${preview.schemaVersion()}"></span></li>
+      <li>Market as-of: <span th:text="${preview.marketAsOf()}"></span></li>
+      <li>Records: <span th:text="${preview.recordCount()}"></span></li>
+      <li>Checksum: <span th:text="${preview.canonicalChecksum()}"></span></li>
+      <li>Disposition: <span th:text="${preview.disposition()}"></span></li>
+    </ul>
+    <form method="post" th:action="@{/admin/imports/commit}">
+      <input type="hidden" name="expectedChecksum" th:value="${preview.canonicalChecksum()}"/>
+      <textarea name="snapshotJson" th:text="${previewJson}"></textarea>
+      <br/><button type="submit">Commit import</button>
+    </form>
+  </div>
+
+  <h2>Preview a snapshot (ADMIN)</h2>
+  <form method="post" th:action="@{/admin/imports/preview}">
+    <textarea name="snapshotJson" placeholder="Paste a schema v1 analytics snapshot JSON"></textarea>
+    <br/><button type="submit">Preview</button>
+  </form>
+
+  <h2>Import history</h2>
+  <table>
+    <tr><th>Snapshot</th><th>Producer</th><th>Schema</th><th>Market as-of</th><th>Imported</th><th>By</th><th>Records</th><th>Checksum</th><th>Status</th></tr>
+    <tr th:each="i : ${imports}">
+      <td th:text="${i.snapshotId()}"></td>
+      <td th:text="${i.producer()} + ' ' + ${i.producerVersion()}"></td>
+      <td th:text="${i.schemaVersion()}"></td>
+      <td th:text="${i.marketAsOf()}"></td>
+      <td th:text="${i.importedAt()}"></td>
+      <td th:text="${i.importedBy()}"></td>
+      <td th:text="${i.recordCount()}"></td>
+      <td th:text="${i.checksumPrefix()} + '…'"></td>
+      <td th:text="${i.status()}"></td>
+    </tr>
+    <tr th:if="${imports.isEmpty()}"><td colspan="9">No snapshots imported (NOT_INTEGRATED — no real producer yet).</td></tr>
+  </table>
+</body>
+</html>

@@ -30,6 +30,8 @@ public class AdminQueryService {
     private final dev.b3monitor.domain.auth.AssetCatalog catalog;
     private final dev.b3monitor.domain.auth.OperationalAuthorization authorization;
     private final OutboxAttemptRepository attempts;
+    private final AnalyticsSnapshotRepository snapshots;
+    private final AnalyticsContextRepository analyticsRows;
     private final Clock clock;
     private final boolean workersEnabled;
 
@@ -39,7 +41,9 @@ public class AdminQueryService {
                              TradingSessionCalendar calendar, AdminProperties adminProps,
                              dev.b3monitor.domain.auth.AssetCatalog catalog,
                              dev.b3monitor.domain.auth.OperationalAuthorization authorization,
-                             OutboxAttemptRepository attempts, Clock clock,
+                             OutboxAttemptRepository attempts,
+                             AnalyticsSnapshotRepository snapshots, AnalyticsContextRepository analyticsRows,
+                             Clock clock,
                              @Value("${b3monitor.workers.enabled:false}") boolean workersEnabled) {
         this.rules = rules;
         this.ruleDefs = ruleDefs;
@@ -52,6 +56,8 @@ public class AdminQueryService {
         this.catalog = catalog;
         this.authorization = authorization;
         this.attempts = attempts;
+        this.snapshots = snapshots;
+        this.analyticsRows = analyticsRows;
         this.clock = clock;
         this.workersEnabled = workersEnabled;
     }
@@ -173,7 +179,67 @@ public class AdminQueryService {
     }
 
     /**
-     * UI-02 (cycle-14 E; refined cycle-15 D): a READ-ONLY operator readiness snapshot — catalog/
+     * UI-02 (cycle-16): bounded, newest-first analytics import history (provenance only; checksum shown as
+     * a prefix). Viewer-readable. No payload, no private data.
+     */
+    @Transactional(readOnly = true)
+    public ImportHistoryListView importHistory(int limit) {
+        int capped = Math.max(1, Math.min(limit, 100));
+        List<ImportHistoryView> rows = snapshots.findByOrderByImportedAtDescIdDesc(
+                org.springframework.data.domain.PageRequest.of(0, capped)).stream()
+                .map(s -> new ImportHistoryView(s.getSnapshotId(), s.getProducer(), s.getProducerVersion(),
+                        s.getSchemaVersion(), String.valueOf(s.getMarketAsOf()), s.getGeneratedAt(),
+                        s.getImportedAt(), s.getImportedBy(), s.getRecordCount(),
+                        s.getChecksum() == null ? null : s.getChecksum().substring(0, Math.min(12, s.getChecksum().length())),
+                        s.getStatus()))
+                .toList();
+        return new ImportHistoryListView(rows);
+    }
+
+    /**
+     * UI-01 (cycle-16): per-asset ANALYTICS CONTEXT from the latest imported snapshot — SEPARATE from quote
+     * freshness. One row per catalog asset: when the latest snapshot has a row for the asset it is shown with
+     * producer/version/schema/as-of/import-time/age + typed indicators (each with its own readiness) + FIN-02
+     * context; otherwise {@code present=false} (explicit no-data). Analytics staleness is judged against the
+     * configured max analytics age — distinct from quote staleness. CONTEXT only (FIN-04): never a rule input.
+     * When NO snapshot has ever been imported, every row is {@code integrationStatus=NOT_INTEGRATED}.
+     */
+    @Transactional(readOnly = true)
+    public AnalyticsContextListView analyticsContext() {
+        var latest = snapshots.findFirstByOrderByMarketAsOfDescImportedAtDesc();
+        long maxAgeSeconds = 2L * 24 * 3600;   // analytics older than ~2 days is flagged stale (daily cadence)
+        List<AnalyticsContextView> rows = catalog.tickers().stream().map(ticker -> {
+            if (latest.isEmpty()) {
+                return new AnalyticsContextView(ticker, false, null, null, null, null, null, null, null, false,
+                        null, null, null, null, null, null, null, null, null, null, null, null,
+                        null, null, null, "NOT_INTEGRATED");
+            }
+            var snap = latest.get();
+            var match = analyticsRows.findBySnapshot_IdAndTicker(snap.getId(), ticker);
+            if (match.isEmpty()) {
+                return new AnalyticsContextView(ticker, false, snap.getSnapshotId(), snap.getProducer(),
+                        snap.getProducerVersion(), snap.getSchemaVersion(), String.valueOf(snap.getMarketAsOf()),
+                        snap.getImportedAt(), null, false,
+                        null, null, null, null, null, null, null, null, null, null, null, null,
+                        null, null, "ANALYTICS_MISSING", "CONSUMER_VERIFIED_SYNTHETIC");
+            }
+            var r = match.get(0);
+            Long age = snap.getMarketAsOf() == null ? null
+                    : Duration.between(snap.getMarketAsOf().atStartOfDay(java.time.ZoneOffset.UTC).toInstant(),
+                              clock.instant()).getSeconds();
+            boolean stale = age != null && age > maxAgeSeconds;
+            return new AnalyticsContextView(ticker, true, snap.getSnapshotId(), snap.getProducer(),
+                    snap.getProducerVersion(), snap.getSchemaVersion(), String.valueOf(snap.getMarketAsOf()),
+                    snap.getImportedAt(), age, stale,
+                    r.getSma20(), r.getSma20Readiness(), r.getSma50(), r.getSma50Readiness(),
+                    r.getRsi14(), r.getRsi14Readiness(), r.getEma9(), r.getEma9Readiness(),
+                    r.getEma21(), r.getEma21Readiness(), r.getVolumeRatio(), r.getVolumeRatioReadiness(),
+                    r.getContextMetrics(), r.getQuality(), r.getStatus(), "CONSUMER_VERIFIED_SYNTHETIC");
+        }).toList();
+        return new AnalyticsContextListView(rows);
+    }
+
+    /**
      * authorization summary, calendar dataset readiness, workers flag, rule counts, and the readiness of
      * each operator component across THREE INDEPENDENT dimensions (wiring / operational / runtime) so code
      * integration is never conflated with operational authorization or runtime verification. Bounded (counts
@@ -206,6 +272,9 @@ public class AdminQueryService {
         boolean calReady = calVersion != null && !"none".equalsIgnoreCase(calVersion);
         String calReadiness = calReady ? "READY" : "NOT_READY";
 
+        long analyticsCount = snapshots.count();
+        boolean analyticsImported = analyticsCount > 0;
+
         var components = List.of(
                 // asset_catalog: wired, no operational dimension, verified by startup load.
                 new ReadinessComponentView("asset_catalog", "READY", "NOT_APPLICABLE", "VERIFIED",
@@ -233,6 +302,15 @@ public class AdminQueryService {
                 // python_daily_indicators: not wired at all.
                 new ReadinessComponentView("python_daily_indicators", "NOT_INTEGRATED", "NOT_APPLICABLE", "NOT_RUN",
                         "daily indicators (SMA/RSI/EMA/volume) and Python context are not wired; values are never synthesized"),
+                // analytics_consumer: the import contract/validator/preview-commit exist (wiring READY), but a
+                // REAL producer snapshot has never been verified at runtime (a synthetic import is NOT_VERIFIED,
+                // never VERIFIED). Operational is NOT_APPLICABLE — importing authorizes nothing.
+                new ReadinessComponentView("analytics_consumer",
+                        "READY", "NOT_APPLICABLE",
+                        analyticsImported ? "NOT_VERIFIED" : "NOT_RUN",
+                        analyticsImported
+                                ? "consumer importer wired; " + analyticsCount + " snapshot(s) imported — CONSUMER_VERIFIED_SYNTHETIC only, real projecao-carteira integration NOT verified"
+                                : "consumer importer wired (schema " + dev.b3monitor.domain.analytics.AnalyticsSnapshotContract.SCHEMA_V1 + "); no snapshot imported yet; real producer integration NOT verified"),
                 // catalog_import: not wired at all.
                 new ReadinessComponentView("catalog_import", "NOT_INTEGRATED", "NOT_APPLICABLE", "NOT_APPLICABLE",
                         "no import pipeline is wired; catalog is a static trusted list — no destructive import exists"),

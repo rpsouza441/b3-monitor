@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Analytics context</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:80rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%;font-size:.85rem}td,th{border:1px solid #ccc;padding:.25rem .4rem;text-align:left}form.inline{display:inline}.ni{color:#a15c00}.ok{color:#1a7f37}.fc{color:#777}.stale{color:#b00020}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/readiness}">Readiness</a>
+    <a th:href="@{/admin/assets}">Assets</a>
+    <a th:href="@{/admin/analytics}">Analytics</a>
+    <a th:href="@{/admin/imports}">Imports</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/alerts}">Alerts</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Analytics context (UI-01 — read-only)</h1>
+  <p>Per-asset analytics from the latest imported snapshot — <strong>separate from quote freshness</strong>.
+     This is CONTEXT only: it is never a rule input, never an operational authorization, and no value is
+     synthesized. Indicators carry their own readiness. <code>NOT_INTEGRATED</code> = no snapshot imported;
+     <code>ANALYTICS_MISSING</code> = snapshot exists but has no row for this asset; <code>CONSUMER_VERIFIED_SYNTHETIC</code>
+     = a validated synthetic snapshot was imported (NOT real Python integration).</p>
+
+  <table>
+    <tr>
+      <th>Ticker</th><th>State</th><th>Producer</th><th>Schema</th><th>Snapshot</th>
+      <th>Analytics as-of</th><th>Imported</th><th>Age (s)</th>
+      <th>SMA20</th><th>SMA50</th><th>RSI14</th><th>EMA9</th><th>EMA21</th><th>Vol ratio</th>
+      <th>Context</th><th>Quality</th>
+    </tr>
+    <tr th:each="r : ${rows}">
+      <td th:text="${r.ticker()}"></td>
+      <td th:text="${r.integrationStatus()}"
+          th:classappend="${r.integrationStatus() == 'CONSUMER_VERIFIED_SYNTHETIC'} ? 'ok' : (${r.integrationStatus() == 'NOT_INTEGRATED'} ? 'ni' : 'fc')"></td>
+      <td><span th:if="${r.present()}" th:text="${r.producer()} + ' ' + ${r.producerVersion()}"></span><span th:unless="${r.present()}">&mdash;</span></td>
+      <td th:text="${r.present()} ? ${r.schemaVersion()} : '—'"></td>
+      <td th:text="${r.present()} ? ${r.snapshotId()} : '—'"></td>
+      <td><span th:class="${r.analyticsStale()} ? 'stale' : ''" th:text="${r.present()} ? ${r.analyticsAsOf()} : '—'"></span>
+          <span th:if="${r.analyticsStale()}" class="stale"> (stale)</span></td>
+      <td th:text="${r.importedAt()}"></td>
+      <td th:text="${r.analyticsAgeSeconds()}"></td>
+      <td th:text="${r.sma20()} + ' / ' + ${r.sma20Readiness()}"></td>
+      <td th:text="${r.sma50()} + ' / ' + ${r.sma50Readiness()}"></td>
+      <td th:text="${r.rsi14()} + ' / ' + ${r.rsi14Readiness()}"></td>
+      <td th:text="${r.ema9()} + ' / ' + ${r.ema9Readiness()}"></td>
+      <td th:text="${r.ema21()} + ' / ' + ${r.ema21Readiness()}"></td>
+      <td th:text="${r.volumeRatio()} + ' / ' + ${r.volumeRatioReadiness()}"></td>
+      <td th:text="${r.contextMetrics()}"></td>
+      <td th:text="${r.quality()}"></td>
+    </tr>
+  </table>
+  <p><a th:href="@{/admin/assets}">Quote freshness (UI-01)</a> is a separate view — analytics staleness and
+     quote staleness are independent.</p>
+</body>
+</html>

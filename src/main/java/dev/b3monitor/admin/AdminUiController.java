@@ -30,10 +30,12 @@ public class AdminUiController {
 
     private final AdminQueryService query;
     private final RuleAdminService admin;
+    private final AnalyticsImportService imports;
 
-    public AdminUiController(AdminQueryService query, RuleAdminService admin) {
+    public AdminUiController(AdminQueryService query, RuleAdminService admin, AnalyticsImportService imports) {
         this.query = query;
         this.admin = admin;
+        this.imports = imports;
     }
 
     @GetMapping("/login")
@@ -82,6 +84,49 @@ public class AdminUiController {
     public String readiness(Model m) {
         m.addAttribute("r", query.readiness());
         return "admin/readiness";
+    }
+
+    @GetMapping("/analytics")
+    public String analytics(Model m) {
+        m.addAttribute("rows", query.analyticsContext().rows());
+        return "admin/analytics";
+    }
+
+    @GetMapping("/imports")
+    public String imports(Model m) {
+        m.addAttribute("imports", query.importHistory(50).imports());
+        return "admin/imports";
+    }
+
+    /** Preview a pasted snapshot (ADMIN + CSRF enforced by the chain). Validate-only; persists nothing. */
+    @PostMapping("/imports/preview")
+    public String previewImport(@RequestParam String snapshotJson, RedirectAttributes ra) {
+        var p = imports.preview(snapshotJson == null ? new byte[0] : snapshotJson.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        ra.addFlashAttribute("preview", p);
+        if (p.wouldImport()) {
+            ra.addFlashAttribute("previewJson", snapshotJson);           // retained so commit resubmits exact bytes
+            ra.addFlashAttribute("ok", "Preview OK: " + p.snapshotId() + " (" + p.recordCount()
+                    + " records, checksum " + p.canonicalChecksum().substring(0, 12) + "…) — review, then commit.");
+        } else {
+            ra.addFlashAttribute("error", "Preview rejected: " + (p.errors().isEmpty() ? "invalid" : p.errors().get(0)));
+        }
+        return "redirect:/admin/imports";
+    }
+
+    /** Commit a previously previewed snapshot (ADMIN + CSRF). Requires the preview token to match the body. */
+    @PostMapping("/imports/commit")
+    public String commitImport(@RequestParam String snapshotJson, @RequestParam String expectedChecksum,
+                               RedirectAttributes ra) {
+        var r = imports.commit(snapshotJson == null ? new byte[0] : snapshotJson.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                expectedChecksum);
+        switch (r.disposition()) {
+            case "IMPORTED" -> ra.addFlashAttribute("ok", "Imported " + r.snapshotId() + " (" + r.recordCount() + " records).");
+            case "IDEMPOTENT_NOOP" -> ra.addFlashAttribute("ok", "Already imported (idempotent): " + r.snapshotId() + ".");
+            case "REJECTED_CONFLICT" -> ra.addFlashAttribute("error", "Conflict: snapshot id " + r.snapshotId() + " reused with a different checksum.");
+            case "REJECTED_TOKEN_MISMATCH" -> ra.addFlashAttribute("error", "Rejected: content changed since preview (token mismatch).");
+            default -> ra.addFlashAttribute("error", "Rejected: validation failed.");
+        }
+        return "redirect:/admin/imports";
     }
 
     // ---- mutation forms (ADMIN + CSRF enforced by the security chain). PRG + flash (cycle-12 G). ----

@@ -29,10 +29,12 @@ public class AdminController {
 
     private final AdminQueryService query;
     private final RuleAdminService admin;
+    private final AnalyticsImportService imports;
 
-    public AdminController(AdminQueryService query, RuleAdminService admin) {
+    public AdminController(AdminQueryService query, RuleAdminService admin, AnalyticsImportService imports) {
         this.query = query;
         this.admin = admin;
+        this.imports = imports;
     }
 
     // ---- reads ----
@@ -80,6 +82,39 @@ public class AdminController {
     /** UI-02 (cycle-14 E): read-only operator readiness snapshot. Activates nothing. */
     @GetMapping("/readiness")
     public AdminDtos.ReadinessView readiness() { return query.readiness(); }
+
+    /** UI-02 (cycle-16): bounded analytics import history (viewer-readable, provenance only). */
+    @GetMapping("/imports")
+    public AdminDtos.ImportHistoryListView imports(@RequestParam(name = "size", defaultValue = "50") int size) {
+        return query.importHistory(size);
+    }
+
+    /** UI-01 (cycle-16): per-asset analytics context from the latest snapshot (viewer-readable, context only). */
+    @GetMapping("/analytics")
+    public AdminDtos.AnalyticsContextListView analytics() { return query.analyticsContext(); }
+
+    // ---- analytics snapshot import (ADMIN + CSRF): preview → commit ----
+
+    /** Validate-only; persists nothing. ADMIN (POST under /api/admin/** is ADMIN-gated). */
+    @PostMapping(value = "/imports/preview", consumes = "application/json")
+    public AnalyticsImportService.PreviewResult previewImport(@RequestBody(required = false) byte[] body) {
+        return imports.preview(body == null ? new byte[0] : body);
+    }
+
+    /** Re-validate + persist. Requires the preview token (expectedChecksum) to match the resubmitted content. */
+    @PostMapping(value = "/imports/commit", consumes = "application/json")
+    public ResponseEntity<AnalyticsImportService.CommitResult> commitImport(
+            @RequestBody(required = false) byte[] body,
+            @RequestParam(name = "expectedChecksum", required = false) String expectedChecksum) {
+        var result = imports.commit(body == null ? new byte[0] : body, expectedChecksum);
+        HttpStatus status = switch (result.disposition()) {
+            case "IMPORTED" -> HttpStatus.CREATED;
+            case "IDEMPOTENT_NOOP" -> HttpStatus.OK;
+            case "REJECTED_CONFLICT" -> HttpStatus.CONFLICT;
+            default -> HttpStatus.BAD_REQUEST;   // REJECTED_VALIDATION / REJECTED_TOKEN_MISMATCH
+        };
+        return ResponseEntity.status(status).body(result);
+    }
 
     // ---- mutations (ADMIN + CSRF) ----
 
