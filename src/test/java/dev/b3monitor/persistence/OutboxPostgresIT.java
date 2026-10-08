@@ -26,8 +26,9 @@ import java.time.ZoneOffset;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration tests against a REAL PostgreSQL via Testcontainers, exercising Flyway V1–V13 (incl. the V13
- * admin_audit_event ledger + the latest-quote index), the unique logical-key constraint, the post-commit
+ * Integration tests against a REAL PostgreSQL via Testcontainers, exercising Flyway V1–V14 (incl. the V13
+ * admin_audit_event ledger + the latest-quote index, and the V14 analytics_snapshot/analytics_context
+ * provenance tables + the extended audit-action CHECK), the unique logical-key constraint, the post-commit
  * dispatcher (claim/lease/fencing/claim-generation), a TWO-CONSUMER dispatch race, durable rule-state
  * recovery, expired-lease quarantine (NO resend), stale-result fencing, revision supersession, V13 audit
  * persistence, latest-quote index compatibility, and the quota first-allocation race. REQUIRES a Docker
@@ -38,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * exercised with the REAL {@code FailClosedDispatchEligibilityGuard} in {@link LifecycleFencePostgresIT}.
  *
  * <p>A FIXED test {@link Clock} (NOW) keeps the 45-minute freshness guard stable on any run date;
- * {@code ddl-auto=validate} makes context start itself prove V1–V13 match the entities.
+ * {@code ddl-auto=validate} makes context start itself prove V1–V14 match the entities.
  */
 @Testcontainers
 @SpringBootTest
@@ -230,5 +231,44 @@ class OutboxPostgresIT {
                 NOW.minusSeconds(60), NOW.minusSeconds(60), false, true, ""));
         var latest = observations.findFirstByRequestedTickerOrderByReceiptTimeDesc("WEGE3").orElseThrow();
         assertEquals(0, latest.getPrice().compareTo(new BigDecimal("41.00")), "newest-by-receipt row returned");
+    }
+
+    @Autowired AnalyticsSnapshotRepository analyticsSnapshots;
+    @Autowired AnalyticsContextRepository analyticsRows;
+
+    /** V14: the analytics_snapshot + analytics_context provenance tables persist, round-trip the unique
+     *  snapshot-id constraint, and cascade on real Postgres (ddl-auto=validate already proves the schema). */
+    @Test
+    void analyticsSnapshotPersistsAndIsUniqueOnRealPostgres() {
+        var snap = new AnalyticsSnapshotEntity("it-snap-1", "b3-monitor.analytics-snapshot/1",
+                "projecao-carteira", "0.0.1-synthetic", NOW, java.time.LocalDate.of(2026, 10, 6),
+                "America/Sao_Paulo", "COTAHIST-RAW", "a".repeat(64), 1, NOW, "admin",
+                "CONSUMER_VERIFIED_SYNTHETIC");
+        snap.addRow(new AnalyticsContextEntity("WEGE3", java.time.LocalDate.of(2026, 10, 6),
+                new BigDecimal("50.10"), "READY", new BigDecimal("48.20"), "READY",
+                new BigDecimal("55.00"), "READY", new BigDecimal("50.90"), "READY",
+                new BigDecimal("51.10"), "READY", new BigDecimal("1.20"), "READY",
+                "graham_fair_value=60.00:BRL:PARTIAL#", "RAW close-only", "OK"));
+        analyticsSnapshots.save(snap);
+        assertNotNull(snap.getId());
+        assertEquals(1, analyticsRows.findBySnapshot_IdAndTicker(snap.getId(), "WEGE3").size());
+
+        // unique snapshot_id: a second row with the same id must fail at the DB constraint.
+        var dup = new AnalyticsSnapshotEntity("it-snap-1", "b3-monitor.analytics-snapshot/1",
+                "projecao-carteira", "0.0.1-synthetic", NOW, java.time.LocalDate.of(2026, 10, 6),
+                "America/Sao_Paulo", "COTAHIST-RAW", "b".repeat(64), 0, NOW, "admin",
+                "CONSUMER_VERIFIED_SYNTHETIC");
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+                () -> analyticsSnapshots.saveAndFlush(dup), "snapshot_id is unique");
+    }
+
+    /** V14: the extended admin-audit CHECK accepts the new IMPORT_SNAPSHOT action on real Postgres. */
+    @Test
+    void auditCheckAcceptsImportSnapshotAction() {
+        var ev = new dev.b3monitor.admin.AdminAuditEvent(NOW, "admin",
+                dev.b3monitor.admin.AdminAuditEvent.Action.IMPORT_SNAPSHOT, null, null, 1L,
+                dev.b3monitor.admin.AdminAuditEvent.Outcome.SUCCESS, "imported it-snap-x", null);
+        var saved = auditRepo.saveAndFlush(ev);
+        assertNotNull(saved.getId(), "V14 CHECK allows IMPORT_SNAPSHOT");
     }
 }

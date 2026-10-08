@@ -260,6 +260,94 @@ class AdminSecurityEnabledTest {
         mvc.perform(get("/admin/assets").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
         mvc.perform(get("/admin/alerts").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
         mvc.perform(get("/admin/readiness").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+        mvc.perform(get("/admin/analytics").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+        mvc.perform(get("/admin/imports").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+    }
+
+    // ---- cycle-16: analytics snapshot import RBAC (FIN-01/FIN-03) ----
+
+    private static final String VALID_SNAPSHOT = """
+        {"schemaVersion":"b3-monitor.analytics-snapshot/1","snapshotId":"sec-snap-1",
+         "producer":"projecao-carteira","producerVersion":"0.0.1-synthetic",
+         "generatedAt":"2026-10-08T12:00:00Z","marketAsOf":"2026-10-06","timezone":"America/Sao_Paulo",
+         "sourceId":"COTAHIST-RAW","checksum":"%s",
+         "records":[{"ticker":"WEGE3","asOf":"2026-10-06",
+            "indicators":{"sma20":50.10,"sma20Readiness":"READY"},"status":"OK"}]}""";
+
+    @Test
+    void importHistoryIsViewerReadable() throws Exception {
+        mvc.perform(get("/api/admin/imports").with(user("viewer").roles("VIEWER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.imports").isArray());
+        // and the per-asset analytics context is viewer-readable and SEPARATE from quote freshness:
+        mvc.perform(get("/api/admin/analytics").with(user("viewer").roles("VIEWER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows").isArray())
+                // with no snapshot imported, every asset is explicit NOT_INTEGRATED (no synthesized value)
+                .andExpect(jsonPath("$.rows[0].integrationStatus").value("NOT_INTEGRATED"))
+                .andExpect(jsonPath("$.rows[0].present").value(false));
+    }
+
+    @Test
+    void viewerCannotPreviewOrCommitImport() throws Exception {
+        // preview/commit are POST under /api/admin/** → ADMIN-only; a VIEWER is forbidden.
+        mvc.perform(post("/api/admin/imports/preview").with(user("viewer").roles("VIEWER")).with(csrf())
+                        .contentType("application/json").content(VALID_SNAPSHOT.formatted("0".repeat(64))))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/admin/imports/commit").with(user("viewer").roles("VIEWER")).with(csrf())
+                        .contentType("application/json").content(VALID_SNAPSHOT.formatted("0".repeat(64))))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void adminImportWithoutCsrfIsDenied() throws Exception {
+        mvc.perform(post("/api/admin/imports/preview").with(user("admin").roles("ADMIN"))
+                        .contentType("application/json").content(VALID_SNAPSHOT.formatted("0".repeat(64))))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void adminPreviewThenCommitWithCsrfSucceeds() throws Exception {
+        // Preview (ADMIN + CSRF) → read back the canonical checksum, then commit the EXACT content.
+        String body = VALID_SNAPSHOT.formatted("0".repeat(64));
+        var previewResult = mvc.perform(post("/api/admin/imports/preview").with(user("admin").roles("ADMIN")).with(csrf())
+                        .contentType("application/json").content(body))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        var node = json.readTree(previewResult);
+        // the placeholder checksum mismatches, so preview rejects it — resubmit with the canonical checksum
+        // embedded in the error, mirroring how the UI flow uses the returned token.
+        boolean wouldImport = node.get("wouldImport").asBoolean();
+        String canonical;
+        if (wouldImport) {
+            canonical = node.get("canonicalChecksum").asText();
+        } else {
+            // recompute: a correctly-checksummed body previews cleanly
+            String err = node.get("errors").get(0).asText();
+            int i = err.indexOf("canonical ");
+            canonical = err.substring(i + "canonical ".length()).trim().substring(0, 64);
+        }
+        String correctBody = VALID_SNAPSHOT.formatted(canonical);
+        var p2 = json.readTree(mvc.perform(post("/api/admin/imports/preview").with(user("admin").roles("ADMIN")).with(csrf())
+                        .contentType("application/json").content(correctBody))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertTrueJson(p2.get("wouldImport"));
+        String token = p2.get("canonicalChecksum").asText();
+
+        mvc.perform(post("/api/admin/imports/commit?expectedChecksum=" + token)
+                        .with(user("admin").roles("ADMIN")).with(csrf())
+                        .contentType("application/json").content(correctBody))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.disposition").value("IMPORTED"));
+        // audit row written
+        org.junit.jupiter.api.Assertions.assertTrue(auditRepo.findByOrderByOccurredAtDescIdDesc(
+                        org.springframework.data.domain.PageRequest.of(0, 20)).stream()
+                .anyMatch(e -> e.getAction() == AdminAuditEvent.Action.IMPORT_SNAPSHOT
+                        && e.getOutcome() == AdminAuditEvent.Outcome.SUCCESS));
+    }
+
+    private static void assertTrueJson(tools.jackson.databind.JsonNode n) {
+        org.junit.jupiter.api.Assertions.assertTrue(n != null && n.asBoolean(), "wouldImport must be true");
     }
 
     @Test
