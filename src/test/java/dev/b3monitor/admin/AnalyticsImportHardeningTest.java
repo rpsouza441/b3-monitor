@@ -36,6 +36,8 @@ class AnalyticsImportHardeningTest {
     @Autowired AnalyticsSnapshotValidator validator;
     @Autowired AnalyticsImportService imports;
     @Autowired AnalyticsSnapshotRepository snapshots;
+    @Autowired AnalyticsContextRepository analyticsRows;
+    @Autowired AnalyticsContextMetricRepository analyticsMetrics;
     @Autowired AdminQueryService query;
     @Autowired OutboxRepository outbox;
     @Autowired RuleDefinitionRepository ruleDefs;
@@ -219,6 +221,195 @@ class AnalyticsImportHardeningTest {
         byte[] body = bytes(base.replaceFirst("\"checksum\":\"[^\"]*\"", "\"checksum\":\"" + canonicalFor(base) + "\""));
         var p = imports.preview(body);
         assertTrue(p.wouldImport(), "fixture should preview cleanly: " + p.errors());
+        var r = imports.commit(body, p.token());
+        assertTrue(r.disposition().equals("IMPORTED") || r.disposition().equals("IDEMPOTENT_NOOP"), r.disposition());
+    }
+
+    // ---- cycle-18 item A: full-document (envelope) binding ----
+
+    /** A valid body whose canonical checksum is already correct, ready to preview+commit. */
+    private byte[] fixed(String json) {
+        return bytes(json.replaceFirst("\"checksum\":\"[^\"]*\"", "\"checksum\":\"" + canonicalFor(json) + "\""));
+    }
+
+    @Test
+    void envelopeOnlyChangeAfterPreviewIsRejected() {
+        // Preview the original; then commit a body that differs ONLY in an envelope field (producer) with
+        // the SAME records checksum. The full-document digest changed, so the token no longer binds.
+        String base = snap("env-bind", "2026-10-06", true, "0".repeat(64));
+        byte[] previewed = fixed(base);
+        var p = imports.preview(previewed);
+        assertTrue(p.wouldImport());
+        String envChangedJson = base.replace("\"producer\":\"projecao-carteira\"", "\"producer\":\"someone-else\"");
+        byte[] envChanged = fixed(envChangedJson);
+        // records checksum is unchanged, but the document digest differs → token DOCUMENT_MISMATCH
+        var r = imports.commit(envChanged, p.token());
+        assertTrue(r.disposition().startsWith("REJECTED_TOKEN_"), "envelope-only change must reject: " + r.disposition());
+        assertTrue(snapshots.findBySnapshotId("env-bind").isEmpty());
+    }
+
+    @Test
+    void whitespaceChangeAfterPreviewIsRejected() {
+        // exact-byte binding: reformatting whitespace after preview invalidates the token
+        String base = snap("ws-bind", "2026-10-06", true, "0".repeat(64));
+        byte[] previewed = fixed(base);
+        var p = imports.preview(previewed);
+        assertTrue(p.wouldImport());
+        byte[] reformatted = bytes(new String(previewed, StandardCharsets.UTF_8).replace(",", ", "));
+        var r = imports.commit(reformatted, p.token());
+        assertTrue(r.disposition().startsWith("REJECTED_TOKEN_"), "whitespace change must reject (exact-byte binding)");
+    }
+
+    // ---- cycle-18 item B: document-identity idempotency / conflict ----
+
+    @Test
+    void sameSnapshotEnvelopeChangeIsConflictNotNoop() {
+        String base = snap("doc-id", "2026-10-06", true, "0".repeat(64));
+        byte[] body = fixed(base);
+        assertEquals("IMPORTED", imports.commit(body, imports.preview(body).token()).disposition());
+        // same snapshotId + same RECORDS but changed envelope (sourceId) → different document → CONFLICT
+        String envJson = snap("doc-id", "2026-10-06", true, "0".repeat(64)).replace("COTAHIST-RAW", "COTAHIST-ADJ");
+        byte[] env = fixed(envJson);
+        var r = imports.commit(env, imports.preview(env).token());
+        assertEquals("REJECTED_CONFLICT", r.disposition(), "same id + changed envelope is a conflict, not a NO_OP");
+    }
+
+    @Test
+    void exactSameDocumentReimportIsNoop() {
+        String base = snap("doc-noop", "2026-10-06", true, "0".repeat(64));
+        byte[] body = fixed(base);
+        assertEquals("IMPORTED", imports.commit(body, imports.preview(body).token()).disposition());
+        assertEquals("IDEMPOTENT_NOOP", imports.commit(body, imports.preview(body).token()).disposition());
+    }
+
+    // ---- cycle-18 item F: numeric round-trip matching the validator (24,12) ----
+
+    @Test
+    void maxScalePrecisionRoundTripsExactly() {
+        // scale 12, precision within 24 — must be accepted AND persisted without rounding
+        String val = "123.123456789012";   // scale 12
+        String j = snap("num-rt", "2026-10-06", true, "0".repeat(64)).replace("50.10", val);
+        byte[] body = fixed(j);
+        var p = imports.preview(body);
+        assertTrue(p.wouldImport(), "scale-12 value must be accepted: " + p.errors());
+        imports.commit(body, p.token());
+        Long sid = snapshots.findBySnapshotId("num-rt").orElseThrow().getId();
+        var row = analyticsRows.findBySnapshot_IdAndTicker(sid, "WEGE3").get(0);
+        assertEquals(0, new java.math.BigDecimal(val).compareTo(row.getSma20()), "scale-12 value round-trips exactly");
+    }
+
+    @Test
+    void scaleBeyond12RejectedBeforeDb() {
+        String j = snap("num-bad", "2026-10-06", true, "0".repeat(64)).replace("50.10", "1.1234567890123"); // scale 13
+        var v = validator.validate(bytes(j));
+        assertFalse(v.valid(), "scale-13 must be rejected by the validator, never silently rounded at the DB");
+        assertTrue(v.errors().stream().anyMatch(e -> e.contains("scale")));
+    }
+
+    // ---- cycle-18 item G: lossless FIN-02 context metrics ----
+
+    @Test
+    void contextMetricRoundTripsAllFieldsLosslessly() {
+        String ctx = "\"context\":[{\"name\":\"graham_fair_value\",\"value\":60.5,\"units\":\"BRL\","
+                + "\"readiness\":\"PARTIAL\",\"quality\":\"audited-snapshot\"}]";
+        String j = snap("ctx-loss", "2026-10-06", true, "0".repeat(64))
+                .replace("\"status\":\"OK\"", ctx + ",\"status\":\"OK\"");
+        byte[] body = fixed(j);
+        var p = imports.preview(body);
+        assertTrue(p.wouldImport(), "" + p.errors());
+        imports.commit(body, p.token());
+        Long sid = snapshots.findBySnapshotId("ctx-loss").orElseThrow().getId();
+        var row = analyticsRows.findBySnapshot_IdAndTicker(sid, "WEGE3").get(0);
+        var metrics = analyticsMetrics.findByContext_Id(row.getId());
+        assertEquals(1, metrics.size());
+        var m = metrics.get(0);
+        assertEquals("graham_fair_value", m.getName());
+        assertEquals(0, new java.math.BigDecimal("60.5").compareTo(m.getValue()));
+        assertEquals("BRL", m.getUnits());
+        assertEquals("PARTIAL", m.getReadiness());
+        assertEquals("audited-snapshot", m.getQuality(), "context metric quality round-trips (was lost in cycle-16)");
+    }
+
+    @Test
+    void duplicateContextMetricNameRejected() {
+        String ctx = "\"context\":[{\"name\":\"g\",\"value\":1,\"readiness\":\"READY\"},"
+                + "{\"name\":\"g\",\"value\":2,\"readiness\":\"READY\"}]";
+        String j = snap("ctx-dup", "2026-10-06", true, "0".repeat(64))
+                .replace("\"status\":\"OK\"", ctx + ",\"status\":\"OK\"");
+        var v = validator.validate(bytes(j));
+        assertFalse(v.valid());
+        assertTrue(v.errors().stream().anyMatch(e -> e.contains("duplicated in context")));
+    }
+
+    // ---- cycle-18 item I: checksum fidelity (quality fields now included) ----
+
+    @Test
+    void recordQualityChangeChangesChecksum() {
+        String a = snap("ck-rq", "2026-10-06", true, "0".repeat(64));
+        String b = a.replace("\"status\":\"OK\"", "\"quality\":\"X\",\"status\":\"OK\"");
+        String c = a.replace("\"status\":\"OK\"", "\"quality\":\"Y\",\"status\":\"OK\"");
+        assertNotEquals(canonicalFor(b), canonicalFor(c), "record.quality is in the semantic checksum");
+    }
+
+    @Test
+    void contextQualityChangeChangesChecksum() {
+        String base = snap("ck-cq", "2026-10-06", true, "0".repeat(64));
+        String b = base.replace("\"status\":\"OK\"",
+                "\"context\":[{\"name\":\"g\",\"value\":1,\"readiness\":\"READY\",\"quality\":\"A\"}],\"status\":\"OK\"");
+        String c = base.replace("\"status\":\"OK\"",
+                "\"context\":[{\"name\":\"g\",\"value\":1,\"readiness\":\"READY\",\"quality\":\"B\"}],\"status\":\"OK\"");
+        assertNotEquals(canonicalFor(b), canonicalFor(c), "context metric quality is in the semantic checksum");
+    }
+
+    // ---- cycle-18 item D: PER-TICKER current selection across partial snapshots ----
+
+    @Test
+    void perTickerPartialSnapshotKeepsEachTickersLatestValidContext() {
+        // older snapshot (marketAsOf 2026-10-05) has BPAC11; newer PARTIAL snapshot (2026-10-07) has WEGE3 only.
+        String older = twoTicker("sel-older", "2026-10-05", "BPAC11", "WEGE3");
+        importFixed(older);
+        String newerPartial = oneTicker("sel-newer", "2026-10-07", "WEGE3");
+        importFixed(newerPartial);
+        var rows = query.analyticsContext().rows();
+        var wege = rows.stream().filter(r -> r.ticker().equals("WEGE3")).findFirst().orElseThrow();
+        var bpac = rows.stream().filter(r -> r.ticker().equals("BPAC11")).findFirst().orElseThrow();
+        assertEquals("sel-newer", wege.snapshotId(), "WEGE3 uses the newer snapshot");
+        assertEquals("2026-10-07", wege.analyticsAsOf());
+        assertEquals("sel-older", bpac.snapshotId(), "BPAC11 keeps its older valid data (newer snapshot omits it)");
+        assertEquals("2026-10-05", bpac.analyticsAsOf());
+    }
+
+    @Test
+    void analyticsHasNoInventedStaleSla() {
+        importSnap("no-sla", "2026-10-06");
+        var wege = query.analyticsContext().rows().stream()
+                .filter(r -> r.ticker().equals("WEGE3")).findFirst().orElseThrow();
+        assertEquals("POLICY_NOT_CONFIGURED", wege.stalePolicy(), "no invented 2-day stale threshold");
+        assertNotNull(wege.analyticsAgeSeconds(), "age is still visible");
+    }
+
+    // helpers for multi-ticker snapshots
+    private String oneTicker(String id, String marketAsOf, String ticker) {
+        String rec = "{\"ticker\":\"" + ticker + "\",\"asOf\":\"" + marketAsOf + "\","
+                + "\"indicators\":{\"sma20\":50.10,\"sma20Readiness\":\"READY\"},\"status\":\"OK\"}";
+        return envelope(id, marketAsOf, rec);
+    }
+    private String twoTicker(String id, String marketAsOf, String t1, String t2) {
+        String r1 = "{\"ticker\":\"" + t1 + "\",\"asOf\":\"" + marketAsOf + "\",\"indicators\":{\"sma20\":10.0,\"sma20Readiness\":\"READY\"},\"status\":\"OK\"}";
+        String r2 = "{\"ticker\":\"" + t2 + "\",\"asOf\":\"" + marketAsOf + "\",\"indicators\":{\"sma20\":20.0,\"sma20Readiness\":\"READY\"},\"status\":\"OK\"}";
+        return envelope(id, marketAsOf, r1 + "," + r2);
+    }
+    private String envelope(String id, String marketAsOf, String records) {
+        return "{\"schemaVersion\":\"b3-monitor.analytics-snapshot/1\",\"snapshotId\":\"" + id + "\","
+                + "\"producer\":\"projecao-carteira\",\"producerVersion\":\"0.0.1\","
+                + "\"generatedAt\":\"2026-10-08T12:00:00Z\",\"marketAsOf\":\"" + marketAsOf + "\","
+                + "\"timezone\":\"America/Sao_Paulo\",\"sourceId\":\"COTAHIST-RAW\",\"checksum\":\"" + "0".repeat(64) + "\","
+                + "\"records\":[" + records + "]}";
+    }
+    private void importFixed(String json) {
+        byte[] body = fixed(json);
+        var p = imports.preview(body);
+        assertTrue(p.wouldImport(), "fixture must preview cleanly: " + p.errors());
         var r = imports.commit(body, p.token());
         assertTrue(r.disposition().equals("IMPORTED") || r.disposition().equals("IDEMPOTENT_NOOP"), r.disposition());
     }

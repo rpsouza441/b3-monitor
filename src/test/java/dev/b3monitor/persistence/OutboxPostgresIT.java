@@ -242,13 +242,15 @@ class OutboxPostgresIT {
     void analyticsSnapshotPersistsAndIsUniqueOnRealPostgres() {
         var snap = new AnalyticsSnapshotEntity("it-snap-1", "b3-monitor.analytics-snapshot/1",
                 "projecao-carteira", "0.0.1-synthetic", NOW, java.time.LocalDate.of(2026, 10, 6),
-                "America/Sao_Paulo", "COTAHIST-RAW", "a".repeat(64), 1, NOW, "admin",
+                "America/Sao_Paulo", "COTAHIST-RAW", "a".repeat(64), "d".repeat(64), 1, NOW, "admin",
                 "CONSUMER_VERIFIED_SYNTHETIC");
-        snap.addRow(new AnalyticsContextEntity("WEGE3", java.time.LocalDate.of(2026, 10, 6),
+        var row = new AnalyticsContextEntity("WEGE3", java.time.LocalDate.of(2026, 10, 6),
                 new BigDecimal("50.10"), "READY", new BigDecimal("48.20"), "READY",
                 new BigDecimal("55.00"), "READY", new BigDecimal("50.90"), "READY",
                 new BigDecimal("51.10"), "READY", new BigDecimal("1.20"), "READY",
-                "graham_fair_value=60.00:BRL:PARTIAL#", "RAW close-only", "OK"));
+                "RAW close-only", "OK");
+        row.addMetric(new AnalyticsContextMetricEntity("graham_fair_value", new BigDecimal("60.00"), "BRL", "PARTIAL", "snapshot"));
+        snap.addRow(row);
         analyticsSnapshots.save(snap);
         assertNotNull(snap.getId());
         assertEquals(1, analyticsRows.findBySnapshot_IdAndTicker(snap.getId(), "WEGE3").size());
@@ -256,7 +258,7 @@ class OutboxPostgresIT {
         // unique snapshot_id: a second row with the same id must fail at the DB constraint.
         var dup = new AnalyticsSnapshotEntity("it-snap-1", "b3-monitor.analytics-snapshot/1",
                 "projecao-carteira", "0.0.1-synthetic", NOW, java.time.LocalDate.of(2026, 10, 6),
-                "America/Sao_Paulo", "COTAHIST-RAW", "b".repeat(64), 0, NOW, "admin",
+                "America/Sao_Paulo", "COTAHIST-RAW", "b".repeat(64), "e".repeat(64), 0, NOW, "admin",
                 "CONSUMER_VERIFIED_SYNTHETIC");
         assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
                 () -> analyticsSnapshots.saveAndFlush(dup), "snapshot_id is unique");
@@ -289,7 +291,7 @@ class OutboxPostgresIT {
                 return tt.execute(s -> {
                     var e = new AnalyticsSnapshotEntity("race-snap", "b3-monitor.analytics-snapshot/1",
                             "projecao-carteira", "0.0.1", NOW, java.time.LocalDate.of(2026, 10, 6),
-                            "America/Sao_Paulo", "COTAHIST-RAW", "c".repeat(64), 0, NOW, "admin",
+                            "America/Sao_Paulo", "COTAHIST-RAW", "c".repeat(64), "f".repeat(64), 0, NOW, "admin",
                             "CONSUMER_VERIFIED_SYNTHETIC");
                     analyticsSnapshots.saveAndFlush(e);
                     return "OK";
