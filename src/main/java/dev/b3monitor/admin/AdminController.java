@@ -77,6 +77,10 @@ public class AdminController {
         return query.alertOutcomes(size);   // service hard-caps size + child attempts
     }
 
+    /** UI-02 (cycle-14 E): read-only operator readiness snapshot. Activates nothing. */
+    @GetMapping("/readiness")
+    public AdminDtos.ReadinessView readiness() { return query.readiness(); }
+
     // ---- mutations (ADMIN + CSRF) ----
 
     @PostMapping("/rules")

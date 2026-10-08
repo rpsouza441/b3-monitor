@@ -259,6 +259,24 @@ class AdminSecurityEnabledTest {
         mvc.perform(get("/admin/rules").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
         mvc.perform(get("/admin/assets").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
         mvc.perform(get("/admin/alerts").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+        mvc.perform(get("/admin/readiness").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
+    }
+
+    @Test
+    void readinessIsReadOnlyAndViewerReadable() throws Exception {
+        // UI-02 readiness is a read-only JSON snapshot: viewer-readable, reports catalog + NOT_INTEGRATED
+        // components, and introduces no mutation/activation endpoint.
+        mvc.perform(get("/api/admin/readiness").with(user("viewer").roles("VIEWER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.catalogAssets").value(23))
+                .andExpect(jsonPath("$.workersEnabled").value(false))
+                .andExpect(jsonPath("$.components[?(@.component=='python_daily_indicators')].state")
+                        .value(org.hamcrest.Matchers.hasItem("NOT_INTEGRATED")))
+                .andExpect(jsonPath("$.components[?(@.component=='catalog_import')].state")
+                        .value(org.hamcrest.Matchers.hasItem("NOT_INTEGRATED")));
+        // no POST activation/import endpoint exists under readiness
+        mvc.perform(post("/api/admin/readiness").with(user("admin").roles("ADMIN")).with(csrf()))
+                .andExpect(status().is4xxClientError());
     }
 
     @Test

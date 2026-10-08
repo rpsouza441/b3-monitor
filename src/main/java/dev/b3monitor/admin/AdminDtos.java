@@ -74,6 +74,20 @@ public final class AdminDtos {
     public record AlertOutcomeListView(List<AlertOutcomeView> alerts) {}
     public record AssetFreshnessListView(List<AssetFreshnessView> assets) {}
 
+    /** UI-02 (cycle-14 E): a READ-ONLY operator readiness snapshot. Each component reports a readiness
+     *  state plus an explicit human-readable reason. NOTHING here activates, imports, polls or sends — it
+     *  only makes operator state and its gaps visible. {@code NOT_READY}/{@code NOT_INTEGRATED} causes are
+     *  stated literally so the UI never implies a capability that is not actually wired. */
+    public record ReadinessComponentView(String component, String state, String detail) {}
+
+    public record ReadinessView(
+            long catalogAssets,
+            long assetsAuthorized, long assetsPartial, long assetsQuarantined, long assetsNotAuthorized,
+            boolean workersEnabled,
+            String calendarDatasetVersion, String calendarZone, String calendarReadiness,
+            long rulesTotal, long rulesOperable, long rulesPaused,
+            List<ReadinessComponentView> components) {}
+
     // ---- request models ----
 
     public record CreateRuleRequest(String ruleId, String ticker, Comparator comparator,

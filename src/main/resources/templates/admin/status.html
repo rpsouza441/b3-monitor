@@ -8,7 +8,8 @@
 <body>
   <nav>
     <a th:href="@{/admin/status}">Status</a>
-    <a th:href="@{/admin/rules}">Rules</a>
+    
+    <a th:href="@{/admin/readiness}">Readiness</a><a th:href="@{/admin/rules}">Rules</a>
     <a th:href="@{/admin/outbox}">Outbox</a>
     <a th:href="@{/admin/audit}">Audit</a>
     <form method="post" th:action="@{/admin/logout}" style="display:inline">

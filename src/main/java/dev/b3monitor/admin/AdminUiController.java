@@ -78,6 +78,12 @@ public class AdminUiController {
         return "admin/audit";
     }
 
+    @GetMapping("/readiness")
+    public String readiness(Model m) {
+        m.addAttribute("r", query.readiness());
+        return "admin/readiness";
+    }
+
     // ---- mutation forms (ADMIN + CSRF enforced by the security chain). PRG + flash (cycle-12 G). ----
 
     @PostMapping("/rules")

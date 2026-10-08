@@ -172,6 +172,66 @@ public class AdminQueryService {
         return new AlertOutcomeListView(alerts);
     }
 
+    /**
+     * UI-02 (cycle-14 E): a READ-ONLY operator readiness snapshot — catalog/authorization summary,
+     * calendar dataset readiness, workers flag, rule counts, and the integration readiness of the
+     * components that are NOT yet wired (Brapi contract/quota, Python/daily-indicator, import), each with
+     * an explicit cause. Bounded (counts + 23 single authorization probes). It activates NOTHING: there is
+     * no import, no live poll, no send, no mutation here. The literal UI-02 acceptance (imports creating
+     * audit revisions) is NOT met by this view — it advances VISIBILITY only; UI-02 stays PARTIAL.
+     */
+    @Transactional(readOnly = true)
+    public ReadinessView readiness() {
+        long authorized = 0, partial = 0, quarantined = 0, notAuthorized = 0;
+        for (String ticker : catalog.tickers()) {
+            var status = authorization.evaluate(
+                    new dev.b3monitor.domain.rule.PriceRule("ui-probe", ticker,
+                            dev.b3monitor.domain.rule.Comparator.ABOVE, java.math.BigDecimal.ONE, 2,
+                            java.math.BigDecimal.ZERO, 1, dev.b3monitor.domain.rule.RuleMode.UNSELECTED)
+            ).status();
+            switch (status) {
+                case AUTHORIZED -> authorized++;
+                case PARTIAL_IDENTITY -> partial++;
+                case QUARANTINED -> quarantined++;
+                default -> notAuthorized++;
+            }
+        }
+        long total = ruleDefs.count();
+        long operable = ruleDefs.findByEnabledTrueAndPausedFalse().stream()
+                .filter(e -> e.getMode().isOperable()).count();
+        long paused = ruleDefs.findAll().stream().filter(RuleDefinitionEntity::isPaused).count();
+
+        String calVersion = calendar.datasetVersion();
+        boolean calReady = calVersion != null && !"none".equalsIgnoreCase(calVersion);
+        String calReadiness = calReady ? "READY" : "NOT_READY";
+
+        var components = List.of(
+                new ReadinessComponentView("asset_catalog", "READY",
+                        catalog.tickers().size() + " canonical tickers (trusted catalog; class never inferred from suffix)"),
+                new ReadinessComponentView("operational_authorization",
+                        authorized == 0 ? "FAIL_CLOSED" : "PARTIAL",
+                        "all assets start NOT_AUTHORIZED; " + authorized + " authorized / " + partial
+                                + " partial-identity / " + quarantined + " quarantined / " + notAuthorized + " not-authorized"),
+                new ReadinessComponentView("trading_calendar", calReadiness,
+                        calReady ? "dataset " + calVersion + " loaded (" + calendar.zone() + ")"
+                                 : "no validated dataset — fail-closed, every session UNKNOWN, holidays never invented"),
+                new ReadinessComponentView("workers", workersEnabled ? "ENABLED" : "DISABLED",
+                        workersEnabled ? "collection/dispatch workers enabled" : "workers disabled (no real polling or send)"),
+                new ReadinessComponentView("brapi_contract", "NOT_INTEGRATED",
+                        "live Brapi is a human gate (no credential, no real poll in this milestone); quota provenance modelled but not exercised live"),
+                new ReadinessComponentView("python_daily_indicators", "NOT_INTEGRATED",
+                        "daily indicators (SMA/RSI/EMA/volume) and Python context are not wired; values are never synthesized"),
+                new ReadinessComponentView("catalog_import", "NOT_INTEGRATED",
+                        "no import pipeline is wired; catalog is a static trusted list — no destructive import exists"),
+                new ReadinessComponentView("waha_delivery", "NOT_INTEGRATED",
+                        "real WAHA send is a human gate; only a simulated adapter exists, no recipients configured")
+        );
+
+        return new ReadinessView(catalog.tickers().size(), authorized, partial, quarantined, notAuthorized,
+                workersEnabled, calVersion, calendar.zone().getId(), calReadiness,
+                total, operable, paused, components);
+    }
+
     private static RuleView toRuleView(RuleDefinitionEntity e) {
         return new RuleView(e.getRuleId(), e.getTicker(), e.getComparator(), e.getThreshold(),
                 e.getPrecision(), e.getHysteresis(), e.getMode(), e.getRevision(), e.isEnabled(),
