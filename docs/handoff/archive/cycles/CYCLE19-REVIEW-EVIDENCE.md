@@ -5,7 +5,8 @@ review of the analytics-snapshot *consumer* boundary, before any real-producer i
 broadening. No push. Docker absent → PostgreSQL IT **NOT_RUN**.
 
 - **Branch:** `checkpoint/cycle7-reviewed`
-- **Start HEAD:** `15cb497` → **final HEAD:** `dab1767` (3 commits; **51 ahead** of `origin/main`, 0 pushed)
+- **Start HEAD:** `15cb497` → **cycle-19 code commits:** `50cb54e` (P1-A/P2), `5b734b5` (P1-C), `dab1767` (tests); **docs/closure commit:** `6fb874c` (**52 ahead** of `origin/main`, 0 pushed). A later housekeeping commit `23ded8c` moved this evidence + the active handoff into `archive/` (**53 ahead**).
+- **Correction (cycle-20 item 4):** an earlier draft of this line read "final HEAD `dab1767` / 51 ahead" — that was the last commit *visible when this doc was being written*, not the closure commit, because a docs commit cannot name its own hash. The authoritative cycle-19 closure is `6fb874c` / 52 ahead; this file now lives at `6fb874c`+ under `archive/`.
 - **Spring Boot** 4.1.1 / **Java** 21 / **Flyway** V1–V15 (no schema change this cycle)
 - **`mvn test`:** **293 passed, 0 failures/errors/skipped** (was 272) — see `test-evidence-cycle19.log`
 - **PostgreSQL IT:** **NOT_RUN** (Docker CLI not installed; nothing installed, host untouched)

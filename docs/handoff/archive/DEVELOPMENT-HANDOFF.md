@@ -1,23 +1,22 @@
-# B3 Monitor — Development Handoff (rev 19)
+# B3 Monitor — Development Handoff (rev 20)
 
 **MVP vertical:** validated B3 quote monitoring with explainable CROSSING price alerts, a durable
 submission-authority outbox, a linearizable rule-lifecycle fence, an append-only admin audit ledger, a
 fail-closed authenticated private admin surface + browser UI (status / readiness / assets / analytics /
 imports / rules / outbox / alerts / audit), and a fail-closed analytics-snapshot CONSUMER with an
 HMAC full-document-bound ADMIN preview→commit importer, transaction-sound concurrent commit, exact
-NUMERIC(24,12) numeric bounds, fail-closed legacy identity, and lossless structured provenance. Offline/local
-only — no live Brapi, no live WAHA, no activation, no deploy.
+NUMERIC(24,12) numeric bounds, deterministic request-size enforcement, fail-closed legacy identity, and
+lossless structured provenance. Offline/local only — no live Brapi, no live WAHA, no activation, no deploy.
 
 ## Build & test
 
-- **Spring Boot 4.1.1**, Java 21. `mvn test` → **293 passed, 0 failures, 0 errors**.
+- **Spring Boot 4.1.1**, Java 21. `mvn test` → **294 passed, 0 failures, 0 errors**. Full log in the review
+  ZIP: `test-evidence-cycle20.log`.
 - **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` (V1–V15, V15 analytics lossless schema,
-  concurrent same-snapshotId commit, **cycle-19: concurrent service-level commit + max-numeric exact
-  round-trip**) + `LifecycleFencePostgresIT` (concurrency races; transaction-bound
-  `pg_backend_pid()`/`pg_blocking_pids()` lock-wait proof) compile and run under `mvn verify -Pdocker-it`.
-  Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
-- Migrations **V1–V15** (Flyway) — **unchanged in cycle 19** (P1-C aligned the validator to the existing
-  V15 NUMERIC(24,12); no schema change was needed).
+  concurrent same-snapshotId commit, concurrent service-level commit + max-numeric exact round-trip) +
+  `LifecycleFencePostgresIT` (concurrency races; transaction-bound `pg_backend_pid()`/`pg_blocking_pids()`
+  lock-wait proof) compile and run under `mvn verify -Pdocker-it`. Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
+- Migrations **V1–V15** (Flyway) — unchanged since cycle 18.
 
 ## Git (branch `checkpoint/cycle7-reviewed`, NO push — `git branch -r` = only `origin/main`)
 
@@ -28,12 +27,26 @@ only — no live Brapi, no live WAHA, no activation, no deploy.
 | `28c16a3`..`e404d39` | cycle-16 (analytics consumer contract v1 + V14 + preview→commit importer + UI-01/UI-02 + producer doc) |
 | `2b0c275`..`23d0141` | cycle-17 (HMAC preview token, strict parser, time invariants, golden checksum, concurrency IT, docs) |
 | `f782ea1`..`15cb497` | cycle-18 (V15 lossless + full-document binding + per-ticker selection + strict nested schema + body-size limit + docs) |
-| `50cb54e` | **cycle-19: transaction-sound concurrent commit (P1-A) + fail-closed legacy document identity (P2)** |
-| `5b734b5` | **cycle-19: numeric bounds exactly match NUMERIC(24,12) (P1-C)** |
-| `dab1767` | **cycle-19: adversarial tests for P1-A/B/C and P2** |
-| (this) | **cycle-19 docs rev 19 + CYCLE19 evidence + archive CYCLE18** |
+| `50cb54e`..`6fb874c` | cycle-19 (P1-A transaction-sound commit, P2 legacy identity, P1-C NUMERIC(24,12), tests, docs rev 19) |
+| `23ded8c` | cycle-19 housekeeping: keep only the review ZIP at `docs/handoff/`; archive handoff + evidence |
+| `1d2e948` | **cycle-20: deterministic 413 for authenticated chunked oversize (item 3)** |
+| (this) | **cycle-20 docs rev 20 + CYCLE20 evidence + CYCLE19 git-state correction + POSIX ZIP + log in package** |
 
-## Cycle-19 changes (detail: `CYCLE19-REVIEW-EVIDENCE.md`)
+## Cycle-20 changes (detail: `CYCLE20-REVIEW-EVIDENCE.md`)
+
+Verification/recoverability pass; no new product scope.
+
+- **Chunked body-size contract (item 3)** — determined, documented, and proven at the real endpoint:
+  declared oversize ⇒ deterministic 413 pre-materialization; an authenticated+CSRF chunked oversize ⇒
+  deterministic 413 from the bounded stream with **nothing imported**; an un-CSRF'd chunked oversize ⇒
+  security-first 401/403 (not weakened to force 413). Both chunked paths never materialize/import the body.
+- **Packaging integrity (item 4)** — the ZIP builder creates entries with explicit POSIX `/` names
+  (independent of the Windows walker); Python `zipfile` validation: 0 backslash / 0 absolute-or-`..` /
+  0 nested-zip / 0 real `.env`/`.git`/`target`/`.kiro`; the full `mvn test` log is **included in the ZIP**;
+  the Cycle-19 evidence git-state discrepancy (`dab1767`/51 vs the true `6fb874c`/52) is corrected.
+- **PostgreSQL runtime gate** — still **NOT_RUN** (Docker absent); nothing installed, host untouched.
+
+## Cycle-19 changes (detail: `archive/cycles/CYCLE19-REVIEW-EVIDENCE.md`)
 
 Closed the Cycle-18 external-review findings on the analytics consumer boundary; no product broadening.
 
