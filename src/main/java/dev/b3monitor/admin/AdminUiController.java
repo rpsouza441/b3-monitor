@@ -124,6 +124,9 @@ public class AdminUiController {
             case "IMPORTED" -> ra.addFlashAttribute("ok", "Imported " + r.snapshotId() + " (" + r.recordCount() + " records).");
             case "IDEMPOTENT_NOOP" -> ra.addFlashAttribute("ok", "Already imported (idempotent): " + r.snapshotId() + ".");
             case "REJECTED_CONFLICT" -> ra.addFlashAttribute("error", "Conflict: snapshot id " + r.snapshotId() + " reused with a different checksum.");
+            case "REJECTED_CONFLICT_LEGACY_NO_DIGEST" -> ra.addFlashAttribute("error",
+                    "Conflict: snapshot id " + r.snapshotId() + " reuses a legacy row with no stored document digest; "
+                            + "its identity cannot be proven. Import under a new snapshotId.");
             default -> {
                 if (r.disposition().startsWith("REJECTED_TOKEN_"))
                     ra.addFlashAttribute("error", "Rejected: preview token invalid (" + r.disposition().substring("REJECTED_TOKEN_".length()) + ").");

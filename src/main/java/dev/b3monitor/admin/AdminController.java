@@ -110,7 +110,7 @@ public class AdminController {
         HttpStatus status = switch (result.disposition()) {
             case "IMPORTED" -> HttpStatus.CREATED;
             case "IDEMPOTENT_NOOP" -> HttpStatus.OK;
-            case "REJECTED_CONFLICT" -> HttpStatus.CONFLICT;
+            case "REJECTED_CONFLICT", "REJECTED_CONFLICT_LEGACY_NO_DIGEST" -> HttpStatus.CONFLICT;
             default -> HttpStatus.BAD_REQUEST;   // REJECTED_VALIDATION / REJECTED_TOKEN_*
         };
         return ResponseEntity.status(status).body(result);

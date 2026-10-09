@@ -46,14 +46,27 @@ public class AnalyticsImportService {
     private final AdminAuditService audit;
     private final AnalyticsPreviewToken tokens;
     private final Clock clock;
+    /** Explicit transaction boundaries (cycle-19 P1-A): the insert attempt runs in its OWN committed/rolled-
+     *  back transaction so a PostgreSQL unique-violation aborts ONLY that inner tx; the orchestration method
+     *  itself is NOT @Transactional, so the post-race re-read runs on a fresh, usable connection. */
+    private final org.springframework.transaction.support.TransactionTemplate writeTx;
+    private final org.springframework.transaction.support.TransactionTemplate readTx;
 
     public AnalyticsImportService(AnalyticsSnapshotValidator validator, AnalyticsSnapshotRepository snapshots,
-                                  AdminAuditService audit, AnalyticsPreviewToken tokens, Clock clock) {
+                                  AdminAuditService audit, AnalyticsPreviewToken tokens, Clock clock,
+                                  org.springframework.transaction.PlatformTransactionManager txManager) {
         this.validator = validator;
         this.snapshots = snapshots;
         this.audit = audit;
         this.tokens = tokens;
         this.clock = clock;
+        this.writeTx = new org.springframework.transaction.support.TransactionTemplate(txManager);
+        this.writeTx.setPropagationBehavior(
+                org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.readTx = new org.springframework.transaction.support.TransactionTemplate(txManager);
+        this.readTx.setReadOnly(true);
+        this.readTx.setPropagationBehavior(
+                org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /** SHA-256 of the EXACT raw request bytes — the full-document digest (envelope + records + whitespace). */
@@ -87,8 +100,18 @@ public class AnalyticsImportService {
      *
      * <p>Idempotency/conflict is on the FULL DOCUMENT identity: same snapshotId + same document digest ⇒
      * NO_OP; same snapshotId + different document ⇒ CONFLICT (never a silent overwrite).
+     *
+     * <p><b>Transaction soundness (cycle-19 P1-A).</b> This method is deliberately NOT {@code @Transactional}.
+     * On PostgreSQL a unique-constraint violation aborts the ENTIRE enclosing transaction ("current
+     * transaction is aborted, commands ignored until end of transaction block"), so the old
+     * catch-and-requery inside one {@code @Transactional} could not read the winner's row. Instead the
+     * durable insert runs in its OWN {@code REQUIRES_NEW} transaction ({@link #writeTx}); if a concurrent
+     * commit of the same snapshotId won the unique constraint, ONLY that inner transaction aborts and rolls
+     * back (insert + its SUCCESS audit together — never a SUCCESS audit without a row). The loser then
+     * re-reads the durable winner on a FRESH {@code REQUIRES_NEW} read transaction ({@link #readTx}) and
+     * disposes by full document identity. A {@code DataIntegrityViolationException} that is NOT the
+     * snapshot-id race (the row still isn't there) is re-thrown — never translated into idempotency.
      */
-    @Transactional
     public CommitResult commit(byte[] raw, String token) {
         Result v = validator.validate(raw);
         if (!v.valid()) {
@@ -108,31 +131,48 @@ public class AnalyticsImportService {
             return new CommitResult("REJECTED_TOKEN_" + verdict.rejection(), s.snapshotId(), checksum, 0);
         }
 
-        var existing = snapshots.findBySnapshotId(s.snapshotId());
-        if (existing.isPresent()) return disposeExisting(existing.get(), s, checksum, docDigest);
+        // Phase 1 — pre-check in its own read tx: the common path when the snapshot already exists.
+        var pre = readTx.execute(st -> snapshots.findBySnapshotId(s.snapshotId()));
+        if (pre != null && pre.isPresent()) return disposeExisting(pre.get(), s, checksum, docDigest);
 
-        AnalyticsSnapshotEntity ent = build(s, checksum, docDigest, actor);
+        // Phase 2 — insert + SUCCESS audit in ONE committed/rolled-back write tx (REQUIRES_NEW).
         try {
-            snapshots.saveAndFlush(ent);   // flush so a concurrent unique-violation surfaces HERE, not post-commit
+            return writeTx.execute(st -> {
+                AnalyticsSnapshotEntity ent = build(s, checksum, docDigest, actor);
+                snapshots.saveAndFlush(ent);   // flush so a unique-violation surfaces HERE, inside THIS tx
+                audit.record(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, (long) s.records().size(),
+                        Outcome.SUCCESS, "imported snapshot " + s.snapshotId() + " (" + s.records().size()
+                                + " records, checksum " + checksum.substring(0, 12) + "…)");
+                return new CommitResult("IMPORTED", s.snapshotId(), checksum, s.records().size());
+            });
         } catch (org.springframework.dao.DataIntegrityViolationException race) {
-            // Item K: a concurrent commit of the SAME snapshotId won the unique constraint. Re-read the
-            // durable row and compare the FULL document identity — translate ONLY this specific race, never
-            // an arbitrary integrity error, into the user-level idempotent/conflict outcome.
-            var now = snapshots.findBySnapshotId(s.snapshotId());
-            if (now.isPresent()) return disposeExisting(now.get(), s, checksum, docDigest);
-            throw race;   // not the snapshot-id race we understand — do not swallow it
+            // The inner write tx has already rolled back (no row, no SUCCESS audit). This connection/thread
+            // is clean. Re-read the durable winner on a FRESH read tx and dispose by full document identity.
+            var now = readTx.execute(st -> snapshots.findBySnapshotId(s.snapshotId()));
+            if (now != null && now.isPresent()) return disposeExisting(now.get(), s, checksum, docDigest);
+            throw race;   // NOT the snapshot-id race we understand — never swallow an unrelated integrity error
         }
-        audit.record(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, (long) s.records().size(), Outcome.SUCCESS,
-                "imported snapshot " + s.snapshotId() + " (" + s.records().size() + " records, checksum "
-                        + checksum.substring(0, 12) + "…)");
-        return new CommitResult("IMPORTED", s.snapshotId(), checksum, s.records().size());
     }
 
-    /** Resolve a re-import against an already-durable snapshot by FULL document identity. */
+    /**
+     * Resolve a re-import against an already-durable snapshot by FULL document identity.
+     *
+     * <p><b>Legacy policy (cycle-19 P2).</b> V14 rows were persisted before the full-document digest existed,
+     * so their {@code document_digest} is NULL and the original raw bytes were never stored — we CANNOT prove
+     * that a new submission is byte-identical to the historical document. Records-checksum equality is NOT
+     * such proof (two documents with identical records but a different envelope/provenance share a records
+     * checksum — exactly the gap cycle-18 closed). So a re-import whose snapshotId collides with a legacy
+     * NULL-digest row is treated FAIL-CLOSED as a {@code REJECTED_CONFLICT_LEGACY_NO_DIGEST}: we neither
+     * fabricate a digest for the old row (no destructive back-fill) nor claim an unprovable NO_OP. The
+     * operator imports under a fresh snapshotId. V15+ rows carry a real digest and get exact NO_OP/CONFLICT.
+     */
     private CommitResult disposeExisting(AnalyticsSnapshotEntity existing, Snapshot s, String checksum, String docDigest) {
-        boolean sameDoc = docDigest.equals(existing.getDocumentDigest())
-                || (existing.getDocumentDigest() == null && checksum.equals(existing.getChecksum()));
-        if (sameDoc) {
+        if (existing.getDocumentDigest() == null) {
+            audit.recordRejection(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, Outcome.REJECTED_CONFLICT,
+                    "snapshot id reuses a legacy row with no document digest (identity unprovable): " + s.snapshotId());
+            return new CommitResult("REJECTED_CONFLICT_LEGACY_NO_DIGEST", s.snapshotId(), checksum, 0);
+        }
+        if (docDigest.equals(existing.getDocumentDigest())) {
             audit.record(Action.IMPORT_SNAPSHOT, s.snapshotId(), null, null, Outcome.NO_OP,
                     "snapshot already imported (idempotent, same document): " + s.snapshotId());
             return new CommitResult("IDEMPOTENT_NOOP", s.snapshotId(), checksum, existing.getRecordCount());
