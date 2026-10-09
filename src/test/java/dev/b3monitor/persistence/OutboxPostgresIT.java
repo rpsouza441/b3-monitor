@@ -316,4 +316,69 @@ class OutboxPostgresIT {
                 .filter(s -> s.getSnapshotId().equals("race-snap")).count(),
                 "exactly one durable analytics_snapshot row for the raced id");
     }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    dev.b3monitor.admin.AnalyticsImportService imports;
+
+    private byte[] fixedBody(String id, String value) {
+        String rec = "{\"ticker\":\"WEGE3\",\"asOf\":\"2026-10-06\","
+                + "\"indicators\":{\"sma20\":" + value + ",\"sma20Readiness\":\"READY\"},\"status\":\"OK\"}";
+        String base = "{\"schemaVersion\":\"b3-monitor.analytics-snapshot/1\",\"snapshotId\":\"" + id + "\","
+                + "\"producer\":\"projecao-carteira\",\"producerVersion\":\"0.0.1\","
+                + "\"generatedAt\":\"2026-10-08T12:00:00Z\",\"marketAsOf\":\"2026-10-06\","
+                + "\"timezone\":\"America/Sao_Paulo\",\"sourceId\":\"COTAHIST-RAW\",\"checksum\":\"%s\","
+                + "\"records\":[" + rec + "]}";
+        byte[] probe = base.formatted("0".repeat(64)).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        var p = imports.preview(probe);
+        String canonical = p.canonicalChecksum();
+        return base.formatted(canonical).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** Cycle-19 P1-A: drive the REAL {@link dev.b3monitor.admin.AnalyticsImportService#commit} from two
+     *  threads with the IDENTICAL document on real Postgres. The sound (REQUIRES_NEW insert + fresh re-read)
+     *  path must yield exactly one IMPORTED and one IDEMPOTENT_NOOP — never a generic 500, never a second
+     *  durable row, never a SUCCESS audit without a row. This is the runtime proof the H2 test cannot give
+     *  (H2 does not reproduce Postgres' aborted-transaction-after-constraint-violation semantics). */
+    @Test
+    void concurrentServiceCommitSameDocumentYieldsImportedAndNoop() throws Exception {
+        byte[] body = fixedBody("svc-race", "50.10");
+        var token1 = imports.preview(body).token();
+        var token2 = imports.preview(body).token();
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var barrier = new java.util.concurrent.CyclicBarrier(2);
+        java.util.concurrent.Callable<String> c1 = () -> { barrier.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            return imports.commit(body, token1).disposition(); };
+        java.util.concurrent.Callable<String> c2 = () -> { barrier.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            return imports.commit(body, token2).disposition(); };
+        try {
+            var f1 = pool.submit(c1);
+            var f2 = pool.submit(c2);
+            String r1 = f1.get(25, java.util.concurrent.TimeUnit.SECONDS);
+            String r2 = f2.get(25, java.util.concurrent.TimeUnit.SECONDS);
+            assertTrue((r1.equals("IMPORTED") && r2.equals("IDEMPOTENT_NOOP"))
+                            || (r1.equals("IDEMPOTENT_NOOP") && r2.equals("IMPORTED")),
+                    "exactly one IMPORTED and one IDEMPOTENT_NOOP — got " + r1 + "/" + r2);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(1, analyticsSnapshots.findByOrderByImportedAtDescIdDesc(
+                        org.springframework.data.domain.PageRequest.of(0, 50)).stream()
+                .filter(s -> s.getSnapshotId().equals("svc-race")).count(),
+                "exactly one durable row after the concurrent service commit");
+    }
+
+    /** Cycle-19 P1-C: the max NUMERIC(24,12) value round-trips EXACTLY through a real Postgres column — no
+     *  silent rounding — and a value needing 13 integer digits was already refused by the validator before
+     *  it could reach the DB (covered in the H2 hardening test; here we prove the stored precision). */
+    @Test
+    void maxNumericRoundTripsExactlyOnRealPostgres() {
+        String max = "999999999999.999999999999";
+        byte[] body = fixedBody("num-pg", max);
+        var r = imports.commit(body, imports.preview(body).token());
+        assertEquals("IMPORTED", r.disposition());
+        var snap = analyticsSnapshots.findBySnapshotId("num-pg").orElseThrow();
+        var row = analyticsRows.findBySnapshot_IdAndTicker(snap.getId(), "WEGE3").get(0);
+        assertEquals(0, new BigDecimal(max).compareTo(row.getSma20()),
+                "NUMERIC(24,12) stored the max value with no rounding");
+    }
 }

@@ -51,6 +51,7 @@ class AdminSecurityEnabledTest {
     @Autowired RuleAdminService admin;
     @Autowired RuleStateRepository ruleStates;
     @Autowired AdminAuditRepository auditRepo;
+    @Autowired dev.b3monitor.persistence.AnalyticsSnapshotRepository analyticsSnapshots;
     private final JsonMapper json = JsonMapper.builder().build();
 
     @BeforeEach
@@ -348,6 +349,47 @@ class AdminSecurityEnabledTest {
 
     private static void assertTrueJson(tools.jackson.databind.JsonNode n) {
         org.junit.jupiter.api.Assertions.assertTrue(n != null && n.asBoolean(), "wouldImport must be true");
+    }
+
+    // ---- cycle-19 P2: a re-import colliding with a legacy NULL-digest row is a 409 CONFLICT at the endpoint ----
+    @Test
+    void legacyNullDigestReimportReturnsConflictAtEndpoint() throws Exception {
+        // a snapshotId unique to this test (shared context: avoid colliding with sec-snap-1 imports)
+        String id = "sec-legacy-1";
+        String probe = VALID_SNAPSHOT.formatted("0".repeat(64)).replace("sec-snap-1", id);
+        var pn = json.readTree(mvc.perform(post("/api/admin/imports/preview").with(user("admin").roles("ADMIN")).with(csrf())
+                        .contentType("application/json").content(probe))
+                .andReturn().getResponse().getContentAsString());
+        // the placeholder checksum mismatches, so the canonical appears in the error, not the field
+        String canonical;
+        if (pn.get("wouldImport").asBoolean()) {
+            canonical = pn.get("canonicalChecksum").asText();
+        } else {
+            String err = pn.get("errors").get(0).asText();
+            canonical = err.substring(err.indexOf("canonical ") + "canonical ".length()).trim().substring(0, 64);
+        }
+        String correct = VALID_SNAPSHOT.formatted(canonical).replace("sec-snap-1", id);
+        // seed a V14-style legacy row for THIS snapshotId with document_digest = NULL and the matching
+        // records checksum — records-checksum equality must NOT be treated as proof of identity.
+        analyticsSnapshots.saveAndFlush(new dev.b3monitor.persistence.AnalyticsSnapshotEntity(
+                id, "b3-monitor.analytics-snapshot/1", "projecao-carteira", "0.0.1-synthetic",
+                java.time.Instant.parse("2026-10-08T12:00:00Z"), java.time.LocalDate.of(2026, 10, 6),
+                "America/Sao_Paulo", "COTAHIST-RAW", canonical, /*documentDigest*/ null,
+                1, java.time.Instant.parse("2026-10-08T12:00:00Z"), "admin", "CONSUMER_VERIFIED_SYNTHETIC"));
+        // a fresh preview/token, then commit the identical records → fail-closed 409 (never 200/NO_OP)
+        var p2 = json.readTree(mvc.perform(post("/api/admin/imports/preview").with(user("admin").roles("ADMIN")).with(csrf())
+                        .contentType("application/json").content(correct))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        String token = p2.get("token").asText();
+        mvc.perform(post("/api/admin/imports/commit?token=" + java.net.URLEncoder.encode(token, java.nio.charset.StandardCharsets.UTF_8))
+                        .with(user("admin").roles("ADMIN")).with(csrf())
+                        .contentType("application/json").content(correct))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.disposition").value("REJECTED_CONFLICT_LEGACY_NO_DIGEST"));
+        // the legacy row is untouched — no fabricated digest
+        org.junit.jupiter.api.Assertions.assertNull(
+                analyticsSnapshots.findBySnapshotId(id).orElseThrow().getDocumentDigest(),
+                "legacy document_digest stays NULL");
     }
 
     @Test

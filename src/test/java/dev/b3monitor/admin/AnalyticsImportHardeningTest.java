@@ -413,4 +413,149 @@ class AnalyticsImportHardeningTest {
         var r = imports.commit(body, p.token());
         assertTrue(r.disposition().equals("IMPORTED") || r.disposition().equals("IDEMPOTENT_NOOP"), r.disposition());
     }
+
+    // ======================== CYCLE-19 ========================
+
+    private String withValue(String id, String value) {
+        String rec = "{\"ticker\":\"WEGE3\",\"asOf\":\"2026-10-06\","
+                + "\"indicators\":{\"sma20\":" + value + ",\"sma20Readiness\":\"READY\"},\"status\":\"OK\"}";
+        return envelope(id, "2026-10-06", rec);
+    }
+
+    // ---- P1-C: numeric boundary must match NUMERIC(24,12) exactly ----
+
+    @Test
+    void maxValidNumericRoundTripsExactly() {
+        // 12 integer digits + 12 fractional digits = the exact NUMERIC(24,12) ceiling.
+        String max = "999999999999.999999999999";
+        String json = withValue("num-max", max);
+        byte[] body = fixed(json);
+        var p = imports.preview(body);
+        assertTrue(p.wouldImport(), "max NUMERIC(24,12) value must validate: " + p.errors());
+        assertEquals("IMPORTED", imports.commit(body, p.token()).disposition());
+        var row = analyticsRows.findBySnapshot_IdAndTicker(
+                snapshots.findBySnapshotId("num-max").orElseThrow().getId(), "WEGE3").get(0);
+        assertEquals(0, new java.math.BigDecimal(max).compareTo(row.getSma20()), "exact round-trip, no rounding");
+    }
+
+    @Test
+    void maxValidNegativeNumericRoundTripsExactly() {
+        String max = "-999999999999.999999999999";
+        String json = withValue("num-min", max);
+        byte[] body = fixed(json);
+        var p = imports.preview(body);
+        assertTrue(p.wouldImport(), p.errors().toString());
+        assertEquals("IMPORTED", imports.commit(body, p.token()).disposition());
+        var row = analyticsRows.findBySnapshot_IdAndTicker(
+                snapshots.findBySnapshotId("num-min").orElseThrow().getId(), "WEGE3").get(0);
+        assertEquals(0, new java.math.BigDecimal(max).compareTo(row.getSma20()));
+    }
+
+    @Test
+    void positive1E12Rejected() {
+        // 1E12 needs 13 integer digits — it does NOT fit NUMERIC(24,12). Must reject BEFORE persistence.
+        var v = validator.validate(bytes(withValue("e12", "1000000000000")));
+        assertFalse(v.valid(), "1E12 (13 integer digits) must be rejected");
+        assertTrue(v.errors().stream().anyMatch(e -> e.contains("magnitude out of range")), v.errors().toString());
+        assertTrue(snapshots.findBySnapshotId("e12").isEmpty(), "nothing persisted");
+    }
+
+    @Test
+    void scientific1E12NotationRejected() {
+        // the exponential literal 1E12 (BigDecimal scale -12) must also be rejected, not silently accepted.
+        var v = validator.validate(bytes(withValue("e12sci", "1E12")));
+        assertFalse(v.valid(), "1E12 scientific form must be rejected");
+        assertTrue(v.errors().stream().anyMatch(e -> e.contains("magnitude out of range")), v.errors().toString());
+    }
+
+    @Test
+    void negative1E12Rejected() {
+        var v = validator.validate(bytes(withValue("e12neg", "-1000000000000")));
+        assertFalse(v.valid(), "-1E12 must be rejected");
+        assertTrue(v.errors().stream().anyMatch(e -> e.contains("magnitude out of range")));
+    }
+
+    @Test
+    void scaleBeyond12Rejected() {
+        var v = validator.validate(bytes(withValue("scale13", "1.0000000000001")));   // 13 fractional digits
+        assertFalse(v.valid(), "scale 13 must be rejected (NUMERIC(24,12) stores 12)");
+        assertTrue(v.errors().stream().anyMatch(e -> e.contains("scale")), v.errors().toString());
+    }
+
+    @Test
+    void contextMetricValueBoundsEnforced() {
+        // the SAME numeric fit-check applies to structured context-metric values, not only typed indicators.
+        String rec = "{\"ticker\":\"WEGE3\",\"asOf\":\"2026-10-06\","
+                + "\"indicators\":{\"sma20\":10.0,\"sma20Readiness\":\"READY\"},"
+                + "\"context\":[{\"name\":\"graham\",\"value\":1000000000000,\"readiness\":\"PARTIAL\"}],\"status\":\"OK\"}";
+        var v = validator.validate(bytes(envelope("ctx-num", "2026-10-06", rec)));
+        assertFalse(v.valid(), "a context-metric value of 1E12 must be rejected too");
+        assertTrue(v.errors().stream().anyMatch(e -> e.contains("magnitude out of range")), v.errors().toString());
+    }
+
+    // ---- P2: legacy (NULL document_digest) identity is fail-closed ----
+
+    @Test
+    void legacyNullDigestReimportIsConflictNotNoop() {
+        // Seed a V14-style row directly: a durable snapshot whose document_digest is NULL (never stored),
+        // whose records checksum MATCHES the one a re-submission would compute. Records-checksum equality is
+        // NOT proof of full-document identity, so the re-import must FAIL-CLOSED as a legacy conflict —
+        // never a silent NO_OP, and never a fabricated digest on the old row.
+        String json = withValue("legacy-1", "50.10");
+        String canonical = canonicalFor(json);
+        var legacy = new AnalyticsSnapshotEntity("legacy-1", "b3-monitor.analytics-snapshot/1",
+                "projecao-carteira", "0.0.1", NOW, java.time.LocalDate.of(2026, 10, 6),
+                "America/Sao_Paulo", "COTAHIST-RAW", canonical, /*documentDigest*/ null,
+                1, NOW, "admin", "CONSUMER_VERIFIED_SYNTHETIC");
+        snapshots.saveAndFlush(legacy);
+
+        byte[] body = fixed(json);                              // identical records → same records checksum
+        var r = imports.commit(body, imports.preview(body).token());
+        assertEquals("REJECTED_CONFLICT_LEGACY_NO_DIGEST", r.disposition(),
+                "a re-import against a NULL-digest legacy row cannot prove identity → fail-closed conflict");
+        // the legacy row is untouched (no back-fill, no overwrite)
+        assertNull(snapshots.findBySnapshotId("legacy-1").orElseThrow().getDocumentDigest(),
+                "legacy document_digest stays NULL — no fabricated digest");
+    }
+
+    @Test
+    void v15DigestRowStillGivesExactNoopAndConflict() {
+        // A row imported THROUGH the service carries a real document digest, so the normal exact
+        // NO_OP / CONFLICT semantics still hold (the legacy policy does not weaken V15+ behavior).
+        String json = withValue("v15-id", "50.10");
+        byte[] body = fixed(json);
+        assertEquals("IMPORTED", imports.commit(body, imports.preview(body).token()).disposition());
+        assertEquals("IDEMPOTENT_NOOP", imports.commit(body, imports.preview(body).token()).disposition(),
+                "exact same document re-import is a NO_OP");
+        String changed = withValue("v15-id", "51.10");
+        byte[] cb = fixed(changed);
+        assertEquals("REJECTED_CONFLICT", imports.commit(cb, imports.preview(cb).token()).disposition(),
+                "same id + different document is a CONFLICT");
+    }
+
+    // ---- P1-A: concurrent-commit LOSER disposition (deterministic; the true race is the Postgres IT) ----
+
+    @Test
+    void loserOfSameDocumentRaceGetsIdempotentNoop() {
+        // Simulate the winner having already committed: a second commit of the EXACT same document resolves
+        // to IDEMPOTENT_NOOP via the sound pre-check / post-race re-read path — never a 500, never a dup row.
+        String json = withValue("race-same", "50.10");
+        byte[] body = fixed(json);
+        assertEquals("IMPORTED", imports.commit(body, imports.preview(body).token()).disposition());
+        var r = imports.commit(body, imports.preview(body).token());
+        assertEquals("IDEMPOTENT_NOOP", r.disposition());
+        assertEquals(1, snapshots.findAll().stream()
+                .filter(s -> s.getSnapshotId().equals("race-same")).count(), "exactly one durable row");
+    }
+
+    @Test
+    void loserOfDifferentDocumentRaceGetsConflict() {
+        String json = withValue("race-diff", "50.10");
+        byte[] body = fixed(json);
+        assertEquals("IMPORTED", imports.commit(body, imports.preview(body).token()).disposition());
+        String other = withValue("race-diff", "77.77");
+        byte[] ob = fixed(other);
+        assertEquals("REJECTED_CONFLICT", imports.commit(ob, imports.preview(ob).token()).disposition(),
+                "a different document for the same id is a conflict, not a NO_OP");
+    }
 }
