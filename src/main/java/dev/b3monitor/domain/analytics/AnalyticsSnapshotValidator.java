@@ -60,11 +60,13 @@ public class AnalyticsSnapshotValidator {
     /** Documented record status vocabulary. */
     private static final Set<String> ALLOWED_STATUS = Set.of("OK", "PARTIAL", "UNKNOWN");
 
-    /** Max JSON nesting depth and max absolute numeric scale/precision (defensive bounds). */
+    /** Max JSON nesting depth. Numeric values must fit the DB NUMERIC(24,12) column EXACTLY (cycle-19 P1-C):
+     *  scale ∈ [0, 12] AND integer digits ≤ 12. A value needing 13+ integer digits (e.g. 1E12) is rejected
+     *  BEFORE persistence — the old {@code abs ≤ 1E12} / precision≤24 pair accepted 1E12 (13 int digits),
+     *  which overflows NUMERIC(24,12) on PostgreSQL. */
     private static final int MAX_DEPTH = 12;
-    private static final int MAX_NUM_SCALE = 12;
-    private static final int MAX_NUM_PRECISION = 24;
-    private static final java.math.BigDecimal NUM_ABS_LIMIT = new java.math.BigDecimal("1E12");
+    private static final int MAX_NUM_SCALE     = AnalyticsSnapshotContract.NUMERIC_SCALE;      // 12
+    private static final int MAX_NUM_INT_DIGITS = AnalyticsSnapshotContract.NUMERIC_INT_DIGITS; // 12
 
     /** Reject strings that look like scripts, expressions, URLs, paths or archive/executable content. */
     private static final List<String> DANGEROUS_SUBSTRINGS = List.of(
@@ -98,9 +100,13 @@ public class AnalyticsSnapshotValidator {
         JsonNode root;
         try {
             // STRICT parse: reject duplicate JSON keys (a duplicate key is ambiguous and a classic smuggling
-            // vector) and non-finite numbers (NaN/Infinity). The depth of the structure is bounded below.
+            // vector) and non-finite numbers (NaN/Infinity). Floats are read as BigDecimal (not double) so a
+            // full-precision decimal like 999999999999.999999999999 keeps every digit — reading it as a
+            // double would silently round it (e.g. up to 1E12) and corrupt both the bound check and the
+            // round-trip. The depth of the structure is bounded below.
             var reader = mapper.reader()
-                    .with(tools.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION);
+                    .with(tools.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+                    .with(tools.jackson.databind.DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
             root = reader.readTree(new String(raw, StandardCharsets.UTF_8));
         } catch (Exception e) {
             return Result.fail("malformed JSON: " + safe(e.getMessage()));
@@ -303,9 +309,21 @@ public class AnalyticsSnapshotValidator {
         BigDecimal d;
         try { d = new BigDecimal(v.asText()); }
         catch (NumberFormatException e) { errors.add(where + "." + f + " not a decimal"); return null; }
-        if (d.scale() > MAX_NUM_SCALE) errors.add(where + "." + f + " scale exceeds " + MAX_NUM_SCALE);
-        if (d.precision() > MAX_NUM_PRECISION) errors.add(where + "." + f + " precision exceeds " + MAX_NUM_PRECISION);
-        if (d.abs().compareTo(NUM_ABS_LIMIT) > 0) errors.add(where + "." + f + " magnitude out of range");
+        // Exact NUMERIC(24,12) fit (cycle-19 P1-C) — no silent rounding, no overflow. A fractional scale
+        // beyond 12 would be rounded on persistence; 13+ integer digits (e.g. 1E12, stored scale -12) would
+        // overflow. Compute integer digits defensively from the UNSCALED precision and scale: intDigits =
+        // precision - scale (negative scale ⇒ precision + |scale|, which is what 1E12 needs = 13).
+        int scale = d.scale();
+        int intDigits = d.precision() - scale;   // for 1E12: precision 1 - scale(-12) = 13  → rejected
+        if (scale > MAX_NUM_SCALE)
+            errors.add(where + "." + f + " scale " + scale + " exceeds " + MAX_NUM_SCALE
+                    + " (NUMERIC(" + AnalyticsSnapshotContract.NUMERIC_PRECISION + "," + MAX_NUM_SCALE + "))");
+        else if (scale < 0 || intDigits > MAX_NUM_INT_DIGITS)
+            // scale<0 means the value is only representable by shifting the point right (e.g. 1E12); such a
+            // value cannot be stored in a fixed-scale NUMERIC without inventing precision — reject it.
+            errors.add(where + "." + f + " magnitude out of range: " + intDigits + " integer digits exceed "
+                    + MAX_NUM_INT_DIGITS + " (NUMERIC(" + AnalyticsSnapshotContract.NUMERIC_PRECISION + ","
+                    + MAX_NUM_SCALE + ") max magnitude < 1e" + MAX_NUM_INT_DIGITS + ")");
         return d;
     }
 

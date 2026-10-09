@@ -41,6 +41,15 @@ public final class AnalyticsSnapshotContract {
     public static final int MAX_STRING       = 200;          // any single string field
     public static final int CHECKSUM_HEX_LEN = 64;           // SHA-256 lowercase hex
 
+    // ---- numeric capacity (cycle-19 P1-C): MUST exactly match the DB NUMERIC(precision,scale) columns ----
+    // Every indicator and context-metric value is persisted as NUMERIC(24,12). A NUMERIC(24,12) can store at
+    // most 24 significant digits with 12 after the point, i.e. at most 12 INTEGER digits and 12 FRACTIONAL
+    // digits. The validator rejects any value that would not round-trip EXACTLY into that column (no silent
+    // rounding, no overflow) BEFORE persistence. These two constants are the single source of truth.
+    public static final int NUMERIC_PRECISION   = 24;        // total significant digits  (NUMERIC precision)
+    public static final int NUMERIC_SCALE       = 12;        // digits after the decimal   (NUMERIC scale)
+    public static final int NUMERIC_INT_DIGITS  = NUMERIC_PRECISION - NUMERIC_SCALE;   // = 12 integer digits
+
     /** Per-metric readiness, mirroring IND-03 / FIN-02 (readiness is never silently "ready"). */
     public enum MetricReadiness { READY, NOT_READY, PARTIAL, NOT_SUPPORTED }
 
