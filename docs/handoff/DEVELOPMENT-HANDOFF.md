@@ -1,21 +1,23 @@
-# B3 Monitor — Development Handoff (rev 18)
+# B3 Monitor — Development Handoff (rev 19)
 
 **MVP vertical:** validated B3 quote monitoring with explainable CROSSING price alerts, a durable
 submission-authority outbox, a linearizable rule-lifecycle fence, an append-only admin audit ledger, a
 fail-closed authenticated private admin surface + browser UI (status / readiness / assets / analytics /
 imports / rules / outbox / alerts / audit), and a fail-closed analytics-snapshot CONSUMER with an
-HMAC full-document-bound ADMIN preview→commit importer and lossless structured provenance. Offline/local
+HMAC full-document-bound ADMIN preview→commit importer, transaction-sound concurrent commit, exact
+NUMERIC(24,12) numeric bounds, fail-closed legacy identity, and lossless structured provenance. Offline/local
 only — no live Brapi, no live WAHA, no activation, no deploy.
 
 ## Build & test
 
-- **Spring Boot 4.1.1**, Java 21. `mvn test` → **272 passed, 0 failures, 0 errors**.
+- **Spring Boot 4.1.1**, Java 21. `mvn test` → **293 passed, 0 failures, 0 errors**.
 - **PostgreSQL IT NOT_RUN** (Docker absent); `OutboxPostgresIT` (V1–V15, V15 analytics lossless schema,
-  concurrent same-snapshotId commit) + `LifecycleFencePostgresIT` (concurrency races; transaction-bound
+  concurrent same-snapshotId commit, **cycle-19: concurrent service-level commit + max-numeric exact
+  round-trip**) + `LifecycleFencePostgresIT` (concurrency races; transaction-bound
   `pg_backend_pid()`/`pg_blocking_pids()` lock-wait proof) compile and run under `mvn verify -Pdocker-it`.
   Runtime PESSIMISTIC_WRITE: **NOT_PROVEN**.
-- Migrations **V1–V15** (Flyway). V15 = document_digest + NUMERIC(24,12) indicators + structured
-  analytics_context_metric child table.
+- Migrations **V1–V15** (Flyway) — **unchanged in cycle 19** (P1-C aligned the validator to the existing
+  V15 NUMERIC(24,12); no schema change was needed).
 
 ## Git (branch `checkpoint/cycle7-reviewed`, NO push — `git branch -r` = only `origin/main`)
 
@@ -25,13 +27,32 @@ only — no live Brapi, no live WAHA, no activation, no deploy.
 | `c9f0aac`..`06492c6` | cycle-14/15 (concurrency-test integrity, lock-proof identity, readiness dimensions, drift, docs) |
 | `28c16a3`..`e404d39` | cycle-16 (analytics consumer contract v1 + V14 + preview→commit importer + UI-01/UI-02 + producer doc) |
 | `2b0c275`..`23d0141` | cycle-17 (HMAC preview token, strict parser, time invariants, golden checksum, concurrency IT, docs) |
-| `f782ea1` | **cycle-18: V15 lossless analytics + full-document token binding + document-identity idempotency** |
-| `fe83b50` | **cycle-18: strict nested v1 schema + length-prefixed checksum (quality fields)** |
-| `eaacb28` | **cycle-18: per-ticker current selection + remove invented stale SLA + HTTP body-size limit** |
-| `45519c3` | **cycle-18: full-document/per-ticker/numeric/lossless/checksum tests** |
-| (this) | **cycle-18 docs rev 18 + CYCLE18 evidence + archive CYCLE17** |
+| `f782ea1`..`15cb497` | cycle-18 (V15 lossless + full-document binding + per-ticker selection + strict nested schema + body-size limit + docs) |
+| `50cb54e` | **cycle-19: transaction-sound concurrent commit (P1-A) + fail-closed legacy document identity (P2)** |
+| `5b734b5` | **cycle-19: numeric bounds exactly match NUMERIC(24,12) (P1-C)** |
+| `dab1767` | **cycle-19: adversarial tests for P1-A/B/C and P2** |
+| (this) | **cycle-19 docs rev 19 + CYCLE19 evidence + archive CYCLE18** |
 
-## Cycle-18 changes (detail: `CYCLE18-REVIEW-EVIDENCE.md`)
+## Cycle-19 changes (detail: `CYCLE19-REVIEW-EVIDENCE.md`)
+
+Closed the Cycle-18 external-review findings on the analytics consumer boundary; no product broadening.
+
+- **P1-A transaction soundness** — `commit()` is no longer `@Transactional`; the insert runs in a
+  `REQUIRES_NEW` write tx (insert + SUCCESS audit atomic), and a concurrent unique-violation loser re-reads
+  the winner on a fresh `REQUIRES_NEW` read tx and disposes by full document identity (NO_OP/CONFLICT) — no
+  generic 500, no partial persistence, no SUCCESS audit without a row; unrelated integrity errors re-thrown.
+- **P1-B request-size enforcement** — proven at the REAL endpoint (RANDOM_PORT Tomcat + JDK HttpClient):
+  declared oversize → 413 before materialization; chunked oversize → deterministic reject (bounded stream);
+  exactly-at-limit accepted; one-over rejected; oversize browser form rejected; no payload echo. Bounded-stream
+  mechanism proven directly in a filter unit test.
+- **P1-C numeric boundary** — reject any value not round-tripping exactly into `NUMERIC(24,12)` (scale ∈
+  [0,12] AND integer digits ≤ 12); `1E12`/`−1E12` (decimal + scientific) and scale-13 rejected pre-persistence;
+  JSON floats parsed as BigDecimal so a full-precision decimal is not silently rounded to a double.
+- **P2 legacy identity** — a re-import colliding with a V14 NULL-`document_digest` row is
+  `REJECTED_CONFLICT_LEGACY_NO_DIGEST` (HTTP 409); records-checksum equality is not treated as proof of
+  identity; no fabricated digest, no destructive back-fill.
+
+## Cycle-18 changes (detail: `archive/cycles/CYCLE18-REVIEW-EVIDENCE.md`)
 
 - **A full-document binding** — token binds records checksum AND full-document digest; envelope-only /
   whitespace change after preview rejected.
