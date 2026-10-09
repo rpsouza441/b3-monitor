@@ -1,7 +1,9 @@
 package dev.b3monitor.admin;
 
 import dev.b3monitor.domain.analytics.AnalyticsSnapshotContract;
+import dev.b3monitor.persistence.AnalyticsSnapshotRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.ActiveProfiles;
@@ -9,6 +11,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 
+import java.net.CookieManager;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -16,18 +19,30 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Cycle-19 P1-B — REAL-ENDPOINT proof that the analytics import body-size cap is enforced by the registered
- * servlet filter at the actual embedded-Tomcat endpoint, BEFORE Spring materializes {@code @RequestBody
- * byte[]}. A {@code @SpringBootTest(webEnvironment=RANDOM_PORT)} server + a JDK {@link HttpClient} exercise
- * transport semantics that {@code MockMvc} cannot model: a declared {@code Content-Length} over the cap, a
- * chunked (unknown-length) body over the cap, the exactly-at-limit boundary, and one byte over. The 413 is
- * raised by the {@code HIGHEST_PRECEDENCE} filter ahead of Spring Security, so an oversize body is rejected
- * without any auth/CSRF work and without echoing the payload. Runs on H2 — the cap is transport-level and
- * independent of the database, so this needs no Docker.
+ * Cycle-19/20 P1-B — REAL-ENDPOINT proof of the analytics import body-size cap at the actual embedded-Tomcat
+ * endpoint (a {@code @SpringBootTest(webEnvironment=RANDOM_PORT)} server + a JDK {@link HttpClient}), covering
+ * transport semantics {@code MockMvc} cannot model.
+ *
+ * <h2>Contract (cycle-20 item 3 — determined and documented)</h2>
+ * <ol>
+ *   <li><b>Declared {@code Content-Length} &gt; MAX ⇒ DETERMINISTIC 413</b>, before Spring Security and before
+ *       {@code @RequestBody byte[]} materialization. This is the normal case (a well-behaved client sends
+ *       Content-Length) and the strong guarantee.</li>
+ *   <li><b>Chunked / unknown-length body that REACHES import handling (authenticated + CSRF) ⇒ DETERMINISTIC
+ *       413</b>, raised by the bounded stream the instant more than MAX bytes are read, so the oversize body is
+ *       never fully materialized and nothing is imported.</li>
+ *   <li><b>Chunked body that is NOT authorized to reach import handling ⇒ security-first rejection (401/403)
+ *       before the controller reads the body.</b> Spring Security's CSRF filter runs before the body is read,
+ *       so a token-less/anonymous oversize chunked POST is rejected without materialization. This is correct
+ *       and must NOT be weakened to force a 413 — the body is still never imported.</li>
+ * </ol>
+ * The size cap is transport-level and independent of the database, so this runs on H2 (no Docker).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
@@ -47,6 +62,7 @@ class AnalyticsImportSizeLimitEndpointTest {
     }
 
     @LocalServerPort int port;
+    @Autowired AnalyticsSnapshotRepository snapshots;
 
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
@@ -96,23 +112,60 @@ class AnalyticsImportSizeLimitEndpointTest {
         assertFalse(resp.body().contains("aaaa"), "the payload must never be echoed back");
     }
 
-    // 2 — chunked / unknown-length body over the cap -> DETERMINISTIC rejection before the body is
-    //     materialized or imported. With no Content-Length the HIGHEST_PRECEDENCE filter wraps the request
-    //     in a bounded stream and passes it on; Spring Security's CSRF filter runs BEFORE HTTP Basic, so a
-    //     token-less POST is rejected (401) before the controller ever reads the body — and an
-    //     authenticated+CSRF'd request would instead abort at the bounded stream with 413. Both are
-    //     deterministic, both reject before materialization, neither imports. The assertion pins exactly
-    //     that: a non-2xx deterministic reject with no payload echo. (The bounded-stream 413 itself is proven
-    //     directly in AnalyticsImportSizeLimitFilterTest.)
+    // 2 — chunked oversize that is NOT authorized (no CSRF/session): security-first rejection (401/403),
+    //     the body is never materialized or imported. This is the correct, un-weakened behavior.
     @Test
-    void chunkedOversizeRejectedDeterministically() throws Exception {
+    void unauthenticatedChunkedOversizeIsSecurityFirstRejection() throws Exception {
         byte[] body = bodyOfBytes(MAX + 4096);
-        HttpResponse<String> resp = post(body, false);       // input-stream publisher => chunked, no Content-Length
+        HttpResponse<String> resp = post(body, false);       // chunked (no Content-Length)
         int sc = resp.statusCode();
-        assertTrue(sc == 413 || sc == 401 || sc == 403,
-                "chunked oversize must be deterministically rejected before materialization, got " + sc);
-        assertTrue(sc >= 400, "never a 2xx for an oversize chunked body");
-        assertFalse(resp.body().contains("aaaa"), "no payload echo on the chunked path");
+        assertTrue(sc == 401 || sc == 403,
+                "an un-CSRF'd chunked POST is rejected by security before the body is read, got " + sc);
+        assertFalse(resp.body().contains("aaaa"), "no payload echo");
+    }
+
+    // 2b — chunked oversize that REACHES import handling (authenticated + CSRF via a real browser-style
+    //      session) -> DETERMINISTIC 413 from the bounded stream, and NOTHING is imported. This is the
+    //      cycle-20 strengthening: it proves oversized chunked content cannot be materialized or imported
+    //      even when the request is fully authorized, without weakening auth/CSRF.
+    @Test
+    void authenticatedChunkedOversizeIsDeterministic413AndNotImported() throws Exception {
+        // Browser-style session: GET the login page to establish a JSESSIONID + a CSRF token, like a browser.
+        CookieManager cookies = new CookieManager();
+        HttpClient sessionHttp = HttpClient.newBuilder().cookieHandler(cookies)
+                .connectTimeout(Duration.ofSeconds(10)).build();
+        HttpResponse<String> login = sessionHttp.send(
+                HttpRequest.newBuilder(URI.create(base() + "/admin/login")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, login.statusCode(), "login page renders");
+        String csrf = extractCsrf(login.body());
+        assertNotNull(csrf, "login form carries a CSRF token");
+
+        long before = snapshots.count();
+        byte[] body = bodyOfBytes(MAX + 4096);
+        // Chunked (no Content-Length) + Basic auth + the CSRF token as a HEADER (so the CSRF filter never
+        // touches the body) + the session cookie carried by the CookieManager.
+        HttpRequest req = HttpRequest.newBuilder(URI.create(base() + "/api/admin/imports/preview"))
+                .header("Authorization", basic())
+                .header("Content-Type", "application/json")
+                .header("X-CSRF-TOKEN", csrf)
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(body)))
+                .timeout(Duration.ofSeconds(20))
+                .build();
+        HttpResponse<String> resp = sessionHttp.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(413, resp.statusCode(),
+                "an authorized oversize chunked body aborts at the bounded stream with a deterministic 413, got "
+                        + resp.statusCode());
+        assertFalse(resp.body().contains("aaaa"), "no payload echo");
+        assertEquals(before, snapshots.count(), "nothing was imported from the oversize chunked body");
+    }
+
+    private static String extractCsrf(String html) {
+        // Thymeleaf+Spring Security render: <input type="hidden" name="_csrf" value="...">
+        Matcher m = Pattern.compile("name=\"_csrf\"\\s+value=\"([^\"]+)\"").matcher(html);
+        if (m.find()) return m.group(1);
+        m = Pattern.compile("value=\"([^\"]+)\"\\s+name=\"_csrf\"").matcher(html);
+        return m.find() ? m.group(1) : null;
     }
 
     // 3 — exactly 512 KiB is accepted by TRANSPORT (filter lets it through; downstream may 4xx on content,
