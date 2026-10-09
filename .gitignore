@@ -1,0 +1,21 @@
+# Build output
+target/
+*.class
+
+# Secrets / local env (the committed .env.example template is intentionally tracked)
+.env
+*.env
+!.env.example
+application-secret*.yml
+
+# Review bundle + raw evidence logs (reproducible; keep textual handoff/evidence docs instead)
+docs/handoff/b3-monitor-review.zip
+docs/handoff/*.log
+
+# Local DB files
+*.db
+*.sqlite
+
+# Tooling + stray artifacts
+.kiro/
+b3-monitor.zip

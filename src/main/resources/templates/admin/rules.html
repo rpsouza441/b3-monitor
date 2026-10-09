@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Rules</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:70rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.3rem .5rem;text-align:left}form.inline{display:inline}.err{color:#b00}fieldset{margin-top:1.5rem}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    
+    <a th:href="@{/admin/readiness}">Readiness</a><a th:href="@{/admin/assets}">Assets</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/alerts}">Alerts</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Rules</h1>
+  <p style="color:#070" th:if="${ok}" th:text="${ok}"></p>
+  <p class="err" th:if="${error}" th:text="${error}"></p>
+  <table>
+    <tr><th>ID</th><th>Ticker</th><th>Cmp</th><th>Threshold</th><th>Prec</th><th>Hyst</th><th>Mode</th><th>Rev</th><th>Enabled</th><th>Paused</th><th>Actions</th></tr>
+    <tr th:each="r : ${rules}">
+      <td th:text="${r.ruleId()}"></td>
+      <td th:text="${r.ticker()}"></td>
+      <td th:text="${r.comparator()}"></td>
+      <td th:text="${r.threshold()}"></td>
+      <td th:text="${r.precision()}"></td>
+      <td th:text="${r.hysteresis()}"></td>
+      <td th:text="${r.mode()}"></td>
+      <td th:text="${r.revision()}"></td>
+      <td th:text="${r.enabled()}"></td>
+      <td th:text="${r.paused()}"></td>
+      <td>
+        <form class="inline" method="post" th:action="@{/admin/rules/{id}/mode(id=${r.ruleId()})}">
+          <input type="hidden" name="mode" value="CROSSING"/>
+          <button type="submit">Select CROSSING</button>
+        </form>
+        <form class="inline" method="post" th:action="@{/admin/rules/{id}/pause(id=${r.ruleId()})}"><button type="submit">Pause</button></form>
+        <form class="inline" method="post" th:action="@{/admin/rules/{id}/resume(id=${r.ruleId()})}"><button type="submit">Resume</button></form>
+        <form class="inline" method="post" th:action="@{/admin/rules/{id}/disable(id=${r.ruleId()})}"><button type="submit">Disable</button></form>
+      </td>
+    </tr>
+  </table>
+
+  <fieldset>
+    <legend>Create rule (starts UNSELECTED)</legend>
+    <form method="post" th:action="@{/admin/rules}">
+      <input name="ruleId" placeholder="rule id" required/>
+      <input name="ticker" placeholder="TICKER" required/>
+      <select name="comparator"><option th:each="c : ${comparators}" th:value="${c}" th:text="${c}"></option></select>
+      <input name="threshold" placeholder="threshold" required/>
+      <input name="precision" value="2" size="2"/>
+      <input name="hysteresis" value="0"/>
+      <button type="submit">Create</button>
+    </form>
+  </fieldset>
+</body>
+</html>

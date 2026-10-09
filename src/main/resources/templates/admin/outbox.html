@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Outbox</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:70rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.3rem .5rem;text-align:left}form.inline{display:inline}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    
+    <a th:href="@{/admin/readiness}">Readiness</a><a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Outbox metrics</h1>
+  <table>
+    <tr><th>Pending</th><td th:text="${metrics.pending()}">0</td><th>In-flight</th><td th:text="${metrics.inFlight()}">0</td><th>Sending</th><td th:text="${metrics.sending()}">0</td></tr>
+    <tr><th>Accepted</th><td th:text="${metrics.accepted()}">0</td><th>Unknown</th><td th:text="${metrics.unknownOutcome()}">0</td><th>Failed</th><td th:text="${metrics.failed()}">0</td></tr>
+    <tr><th>Cancelled</th><td th:text="${metrics.cancelled()}">0</td><th>Expired</th><td th:text="${metrics.expired()}">0</td><th>Suppressed</th><td th:text="${metrics.suppressed()}">0</td></tr>
+    <tr><th>Oldest pending age (s)</th><td colspan="5" th:text="${metrics.oldestPendingAgeSeconds()}">-</td></tr>
+  </table>
+  <h2>Reconciliation (dead letters, bounded)</h2>
+  <table>
+    <tr><th>Logical key</th><th>Rule</th><th>Ticker</th><th>State</th><th>Rev</th><th>Attempts</th><th>Reason</th></tr>
+    <tr th:each="row : ${reconciliation}">
+      <td th:text="${row.logicalKey()}"></td><td th:text="${row.ruleId()}"></td><td th:text="${row.ticker()}"></td>
+      <td th:text="${row.state()}"></td><td th:text="${row.ruleRevision()}"></td><td th:text="${row.attempts()}"></td>
+      <td th:text="${row.suppressionReason()}"></td>
+    </tr>
+  </table>
+</body>
+</html>

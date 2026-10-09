@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Readiness</title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:70rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%;font-size:.9rem}td,th{border:1px solid #ccc;padding:.25rem .4rem;text-align:left}form.inline{display:inline}.ni{color:#a15c00}.ok{color:#1a7f37}.fc{color:#777}dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem 1rem}dt{font-weight:600}</style>
+</head>
+<body>
+  <nav>
+    <a th:href="@{/admin/status}">Status</a>
+    <a th:href="@{/admin/readiness}">Readiness</a>
+    <a th:href="@{/admin/assets}">Assets</a>
+    <a th:href="@{/admin/rules}">Rules</a>
+    <a th:href="@{/admin/outbox}">Outbox</a>
+    <a th:href="@{/admin/alerts}">Alerts</a>
+    <a th:href="@{/admin/audit}">Audit</a>
+    <form method="post" th:action="@{/admin/logout}" class="inline"><button type="submit">Logout</button></form>
+  </nav>
+  <h1>Operator readiness (UI-02 — read-only)</h1>
+  <p>Read-only visibility. This page activates nothing: no import, no live poll, no send, no mutation.
+     Each component reports three independent dimensions — <strong>wiring</strong> (is the code wired?),
+     <strong>operational</strong> (is it allowed to act?) and <strong>runtime</strong> (has it been proven
+     at runtime?) — so integration is never conflated with authorization or verification. UI-02 remains
+     <strong>PARTIAL</strong> (the acceptance criterion that imports create audit revisions is not met by a view).</p>
+
+  <h2>Summary</h2>
+  <dl>
+    <dt>Catalog assets</dt><dd th:text="${r.catalogAssets()}"></dd>
+    <dt>Authorization</dt>
+    <dd>
+      <span th:text="${r.assetsAuthorized()}"></span> authorized /
+      <span th:text="${r.assetsPartial()}"></span> partial-identity /
+      <span th:text="${r.assetsQuarantined()}"></span> quarantined /
+      <span th:text="${r.assetsNotAuthorized()}"></span> not-authorized
+    </dd>
+    <dt>Workers</dt><dd th:text="${r.workersEnabled()} ? 'ENABLED' : 'DISABLED'"></dd>
+    <dt>Calendar</dt>
+    <dd><span th:text="${r.calendarReadiness()}"></span> —
+        version <span th:text="${r.calendarDatasetVersion()}"></span>,
+        zone <span th:text="${r.calendarZone()}"></span></dd>
+    <dt>Rules</dt>
+    <dd><span th:text="${r.rulesTotal()}"></span> total /
+        <span th:text="${r.rulesOperable()}"></span> operable /
+        <span th:text="${r.rulesPaused()}"></span> paused</dd>
+  </dl>
+
+  <h2>Components</h2>
+  <table>
+    <tr><th>Component</th><th>Wiring</th><th>Operational</th><th>Runtime</th><th>Detail</th></tr>
+    <tr th:each="c : ${r.components()}">
+      <td th:text="${c.component()}"></td>
+      <td th:text="${c.wiringStatus()}"
+          th:classappend="${c.wiringStatus() == 'READY'} ? 'ok' : (${c.wiringStatus() == 'NOT_INTEGRATED'} ? 'ni' : 'fc')"></td>
+      <td th:text="${c.operationalStatus()}"
+          th:classappend="${c.operationalStatus() == 'AUTHORIZED'} ? 'ok' : (${c.operationalStatus() == 'BLOCKED_BY_GATE'} ? 'ni' : 'fc')"></td>
+      <td th:text="${c.runtimeStatus()}"
+          th:classappend="${c.runtimeStatus() == 'VERIFIED'} ? 'ok' : (${c.runtimeStatus() == 'NOT_READY' or c.runtimeStatus() == 'NOT_RUN'} ? 'ni' : 'fc')"></td>
+      <td th:text="${c.detail()}"></td>
+    </tr>
+  </table>
+</body>
+</html>

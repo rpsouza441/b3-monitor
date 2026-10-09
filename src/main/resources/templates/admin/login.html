@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>B3 Monitor — Admin login</title>
+  <style>body{font-family:system-ui,sans-serif;margin:3rem auto;max-width:22rem}label{display:block;margin:.5rem 0 .2rem}input{width:100%;padding:.4rem}button{margin-top:1rem;padding:.5rem 1rem}.err{color:#b00}</style>
+</head>
+<body>
+  <h1>B3 Monitor — Admin</h1>
+  <p class="err" th:if="${param.error}">Invalid credentials.</p>
+  <p th:if="${param.logout}">Logged out.</p>
+  <!-- form login: posts to /admin/login; Thymeleaf injects the CSRF token automatically -->
+  <form method="post" th:action="@{/admin/login}">
+    <label for="u">Username</label>
+    <input id="u" name="username" autocomplete="username" autofocus/>
+    <label for="p">Password</label>
+    <input id="p" name="password" type="password" autocomplete="current-password"/>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>

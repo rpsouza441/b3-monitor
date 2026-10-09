@@ -1,0 +1,23 @@
+# Local development Postgres for B3 Monitor. No secrets committed: the password is
+# supplied via .env (see .env.example). This stack is for LOCAL dev/integration only;
+# it is NOT a production deployment and workers remain disabled by default.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: b3monitor-postgres
+    environment:
+      POSTGRES_DB: b3monitor
+      POSTGRES_USER: b3monitor
+      POSTGRES_PASSWORD: ${B3MONITOR_DB_PASSWORD:?set B3MONITOR_DB_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"   # bound to loopback only
+    volumes:
+      - b3monitor-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U b3monitor -d b3monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  b3monitor-pgdata:

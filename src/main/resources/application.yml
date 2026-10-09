@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: b3-monitor
+  datasource:
+    url: ${B3MONITOR_DB_URL:jdbc:postgresql://localhost:5432/b3monitor}
+    username: ${B3MONITOR_DB_USER:b3monitor}
+    password: ${B3MONITOR_DB_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: validate   # schema is owned by Flyway, never auto-generated
+    open-in-view: false
+    properties:
+      hibernate.format_sql: true
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+b3monitor:
+  # Workers start DISABLED. No unattended real-market polling without explicit enablement.
+  workers:
+    enabled: false
+  # Private admin/status surface (SEC-01). FAIL-CLOSED: off by default, loopback-only, no committed
+  # credentials. When enabled, username + one-way password HASH come from the environment ONLY; if they
+  # are absent the context fails to start (no anonymous / Boot-generated-password fallback).
+  admin:
+    enabled: ${B3MONITOR_ADMIN_ENABLED:false}
+    bind-address: ${B3MONITOR_BIND_ADDRESS:127.0.0.1}
+    username: ${B3MONITOR_ADMIN_USERNAME:}
+    password-hash: ${B3MONITOR_ADMIN_PASSWORD_HASH:}
+    # Bounded browser-session inactivity timeout (SEC-01). Safe 30-min default; never infinite.
+    session-timeout-seconds: ${B3MONITOR_ADMIN_SESSION_TIMEOUT_SECONDS:1800}
+  brapi:
+    base-url: https://brapi.dev/api
+    token: ${B3MONITOR_BRAPI_TOKEN:}   # injected from env; never committed
+  quote:
+    max-age-seconds: 2700   # 45-minute hard freshness guard
+    max-skew-seconds: 120
+
+# Bind HTTP to loopback by default (SEC-01). Override only via B3MONITOR_BIND_ADDRESS.
+server:
+  address: ${B3MONITOR_BIND_ADDRESS:127.0.0.1}
+  servlet:
+    session:
+      # Bounded browser-session inactivity timeout (SEC-01, cycle-12 C). Matches b3monitor.admin.session-timeout-seconds.
+      timeout: ${B3MONITOR_ADMIN_SESSION_TIMEOUT_SECONDS:1800}s
+
+logging:
+  level:
+    dev.b3monitor: INFO
